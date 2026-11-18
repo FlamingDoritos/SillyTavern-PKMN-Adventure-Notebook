@@ -12,7 +12,7 @@
       SillyTavern "PKMN Adventure Notebook" extension.
 ]]
 
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 
 ---------------------------------------------------------------------------------------------------
 -- Paths & config
@@ -793,8 +793,15 @@ local P = nil -- active profile (table of addresses)
 local GAME = { code = "", title = "", crc = "", family = "?", profileName = "?" }
 
 local function r8(a) return emu:read8(a) end
-local function r16(a) return emu:read16(a) end
-local function r32(a) return emu:read32(a) end
+-- The GBA bus rounds unaligned 16/32-bit reads down, so read unaligned values byte by byte
+local function r16(a)
+  if a & 1 == 0 then return emu:read16(a) end
+  return (string.unpack("<I2", emu:readRange(a, 2)))
+end
+local function r32(a)
+  if a & 3 == 0 then return emu:read32(a) end
+  return (string.unpack("<I4", emu:readRange(a, 4)))
+end
 local function rrange(a, n) return emu:readRange(a, n) end
 
 local function sb1() if P.sb1 then return P.sb1 end local p = r32(P.sb1ptr); if p >= 0x02000000 and p < 0x02040000 then return p end return nil end
@@ -1304,8 +1311,8 @@ local function validMapHeaderAt(a)
   if not (isRomPtr(l) and isRomPtr(e) and isRomPtr(sc) and (c == 0 or isRomPtr(c))) then return false end
   local w, h = r32(l), r32(l + 4)
   if w < 1 or w > 1024 or h < 1 or h > 1024 then return false end
-  for i = 0, 3 do if not isRomPtr(r32(l + 8 + 4 * i)) then return false end end
-  for i = 0, 3 do if r8(e + i) > 64 then return false end end
+  -- border and map data must be ROM pointers (tilesets can live elsewhere in some hacks)
+  if not isRomPtr(r32(l + 8)) or not isRomPtr(r32(l + 12)) then return false end
   return true
 end
 
@@ -1760,10 +1767,18 @@ local function onClientData(id)
   end
 end
 
+-- mGBA 0.10 bug: a closed socket gets closed *again* when Lua garbage-collects it, and by then the
+-- OS has often handed the same socket number to a newer connection, which then dies with an empty
+-- reply. Keeping closed sockets referenced means they are never collected (a few bytes each).
+local SOCKET_GRAVEYARD = {}
 local function closePending()
   for _, id in ipairs(toClose) do
     local c = clients[id]
-    if c then clients[id] = nil; pcall(function() c.sock:close() end) end
+    if c then
+      clients[id] = nil
+      pcall(function() c.sock:close() end)
+      SOCKET_GRAVEYARD[#SOCKET_GRAVEYARD + 1] = c.sock
+    end
   end
   toClose = {}
 end
@@ -1969,8 +1984,9 @@ end
 pcall(drawBuffer)
 log("PKMN Adventure Notebook " .. VERSION .. " loaded.")
 
--- exported for tests
-return {
+-- exported for tests. This must stay a global and NOT become a `return` value of the script:
+-- mGBA 0.10 leaves a script's return value on the Lua stack and then crashes on the next frame.
+PKMN_NOTEBOOK_TEST = {
   _test = {
     encode = encode, decodeAt = decodeAt, decodeMon = decodeMon, extractRomData = extractRomData,
     setRom = function(r) ROM = r; ROMSIZE = #r end, json = json, handleRequest = handleRequest, tick = tick,
