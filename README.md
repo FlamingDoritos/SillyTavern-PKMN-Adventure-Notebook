@@ -148,6 +148,7 @@ Results are cached in `mgba\data\`, so the scan only happens once per ROM (under
 | Location shows "Map 3.5" | Map names weren't found for this hack. Events still log, just without names. |
 | Battles in an auto-detected hack | In auto-detected mode a battle is only finalised once you win, lose, catch, or take a step. If a trainer name is missing, the battle text wasn't readable. A `.sym` file gives exact tracking. |
 | Scripting window says "waiting" | Load your save (Continue). On a brand-new game, tracking starts once you have your first Pokémon. |
+| mGBA closes when loading the script | Open `notebook_debug.log` next to the script. Its last line shows the step mGBA reached. Please open an issue with that file. |
 | Need to rescan the ROM | Delete the matching file in `mgba\data\`. |
 
 ## Files

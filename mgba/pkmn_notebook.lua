@@ -12,7 +12,7 @@
       SillyTavern "PKMN Adventure Notebook" extension.
 ]]
 
-local VERSION = "1.1.1"
+local VERSION = "1.1.2"
 
 ---------------------------------------------------------------------------------------------------
 -- Paths & config
@@ -48,8 +48,21 @@ do
   end
 end
 
-local function log(msg) console:log("[Notebook] " .. msg) end
-local function warn(msg) console:warn("[Notebook] " .. msg) end
+-- Crash-safe step log next to the script: if mGBA ever closes unexpectedly, the last line tells where.
+local DEBUG_FILE = SCRIPT_DIR .. "notebook_debug.log"
+local dbgCount = 0
+local function dbg(msg)
+  if dbgCount > 300 then return end
+  dbgCount = dbgCount + 1
+  pcall(function()
+    local f = io.open(DEBUG_FILE, dbgCount == 1 and "w" or "a")
+    if f then f:write(os.date("%H:%M:%S "), tostring(msg), "\n"); f:close() end
+  end)
+end
+dbg("script start, version " .. VERSION .. ", " .. tostring(_VERSION) .. ", dir " .. SCRIPT_DIR)
+
+local function log(msg) console:log("[Notebook] " .. msg); dbg(msg) end
+local function warn(msg) console:warn("[Notebook] " .. msg); dbg("WARN " .. msg) end
 
 ---------------------------------------------------------------------------------------------------
 -- Gen 3 text
@@ -951,12 +964,12 @@ local function currentLocName()
   return nil
 end
 
+-- Is this folder there and writable? (Lua can't create folders without a shell command,
+-- and starting one from inside mGBA isn't safe, so missing folders just fall back to the script's folder.)
 local function ensureDir(path)
-  -- Lua has no mkdir; try opening a file inside to check
   local f = io.open(path .. ".keep", "a")
   if f then f:close(); return true end
-  pcall(function() os.execute('mkdir "' .. path:gsub("[/\\]$", "") .. '"') end)
-  return true
+  return false
 end
 
 local function addEvent(etype, text, imp, data)
@@ -983,7 +996,7 @@ local function openAdventure(player, tid)
   ADV = { id = id, player = player, tid = tid & 0xFFFF, sid = tid >> 16, events = {}, seq = 0 }
   VISITED = {}
   local dir = SCRIPT_DIR .. "logs/"
-  ensureDir(dir)
+  if not ensureDir(dir) then dir = SCRIPT_DIR end
   ADV.file = dir .. id .. ".jsonl"
   local f = io.open(ADV.file, "r")
   if f then
@@ -1551,6 +1564,7 @@ local function tick()
   if not READY then return end
   if not ensureRAM() then return end
   local snap = takeSnapshot()
+  if FRAME < 400 then dbg("tick ok at frame " .. FRAME) end
   if not snap then return end
   -- wait for a real save (title screen / new game intro have no trainer yet)
   if snap.tid == 0 and snap.player == "" then return end
@@ -1693,8 +1707,10 @@ local function httpResponse(code, body, ctype)
   })
 end
 
+local firstRequest = true
 local function handleRequest(req)
   local method, path = req:match("^(%u+)%s+(%S+)")
+  if firstRequest then firstRequest = false; dbg("first HTTP request: " .. tostring(path)) end
   if not method then return httpResponse(404, '{"ok":false}') end
   if method == "OPTIONS" then return httpResponse(204, "") end
   local route = path:match("^([^?]*)")
@@ -1815,26 +1831,35 @@ end
 -- Console status panel
 ---------------------------------------------------------------------------------------------------
 local BUF = nil
+local LAST_BUFFER_TEXT = nil
 local function drawBuffer()
   if not CFG.showConsoleBuffer then return end
+  local lines = {}
+  local function add(t) lines[#lines + 1] = t end
+  add(string.format("PKMN Adventure Notebook v%s | port %d | %s", VERSION, CFG.port, server and "bridge ON" or "bridge OFF"))
+  add(string.format("Game: %s [%s] %s", GAME.title, GAME.code, GAME.profileName))
+  if not READY then add("Waiting for a game...")
+  elseif not ADV or not S then add("Waiting for a save file to be loaded...")
+  else
+    add(string.format("%s | %s | Badges %d/8 | Events: %d", titleCase(S.player), S.loc or "?", popcount(S.badges), #ADV.events))
+    for _, m in ipairs(S.party) do add(string.format("  %-12s Lv%3d  %3d/%3d HP", monShort(m), m.level, m.hp, m.maxHP)) end
+    if BATTLE then add("In battle: " .. (BATTLE.isTrainer and trainerLabel(BATTLE.trainer, BATTLE.trainerId) or "wild") .. " - " .. enemyListText(BATTLE.enemies)) end
+    add("Recent:")
+    for i = math.max(1, #ADV.events - 5), #ADV.events do
+      add("  - " .. (ADV.events[i]:match('"text":"(.-)","type"') or ""))
+    end
+  end
+  -- keep lines short and few: mGBA's text panel is fragile with long or many lines
+  for i, l in ipairs(lines) do
+    if #l > 70 then lines[i] = l:sub(1, 67):gsub("[\128-\191]*$", ""):gsub("[\192-\255]$", "") .. "..." end
+  end
+  while #lines > 18 do table.remove(lines) end
+  local text = table.concat(lines, "\n")
+  if text == LAST_BUFFER_TEXT then return end
+  LAST_BUFFER_TEXT = text
   if not BUF then BUF = console:createBuffer("Adventure Notebook") end
   BUF:clear()
-  BUF:print(string.format("PKMN Adventure Notebook v%s  |  port %d  |  %s\n", VERSION, CFG.port, server and "bridge ON" or "bridge OFF"))
-  BUF:print(string.format("Game: %s [%s] profile %s\n", GAME.title, GAME.code, GAME.profileName))
-  if not READY then BUF:print("Waiting for a game...\n"); return end
-  if not ADV or not S then BUF:print("Waiting for a save file to be loaded...\n"); return end
-  BUF:print(string.format("Trainer: %s  |  %s  |  Badges %d/8  |  Events logged: %d\n\n", titleCase(S.player), S.loc or "?", popcount(S.badges), #ADV.events))
-  for _, m in ipairs(S.party) do
-    BUF:print(string.format("  %-12s Lv%3d  %3d/%3d HP\n", monShort(m), m.level, m.hp, m.maxHP))
-  end
-  if BATTLE then
-    BUF:print("\nIn battle: " .. (BATTLE.isTrainer and trainerLabel(BATTLE.trainer, BATTLE.trainerId) or "wild") .. " - " .. enemyListText(BATTLE.enemies) .. "\n")
-  end
-  BUF:print("\nRecent:\n")
-  for i = math.max(1, #ADV.events - 7), #ADV.events do
-    local text = ADV.events[i]:match('"text":"(.-)","type"') or ""
-    BUF:print("  - " .. text .. "\n")
-  end
+  for _, l in ipairs(lines) do BUF:print(l .. "\n") end
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1842,7 +1867,7 @@ end
 ---------------------------------------------------------------------------------------------------
 local function crcHex()
   local ok, sum = pcall(function() return emu:checksum(C.CHECKSUM.CRC32) end)
-  if not ok or not sum then return "00000000" end
+  if not ok or not sum then dbg("checksum unavailable"); return "00000000" end
   local v = 0
   for i = 1, #sum do v = v * 256 + sum:byte(i) end
   return string.format("%08x", v)
@@ -1912,7 +1937,7 @@ local function countKeys(t) local n = 0 for _ in pairs(t or {}) do n = n + 1 end
 
 local function loadGameData()
   local cacheDir = SCRIPT_DIR .. "data/"
-  ensureDir(cacheDir)
+  if not ensureDir(cacheDir) then cacheDir = SCRIPT_DIR .. "notebook_cache_" end
   local cacheFile = cacheDir .. sanitizeFile(GAME.code .. "_" .. GAME.crc) .. ".lua"
   local f = loadfile(cacheFile)
   if f then
@@ -1924,6 +1949,7 @@ local function loadGameData()
   end
   log("Scanning ROM for game data (first time only, a few seconds)...")
   ROM, ROMSIZE = loadRomString()
+  dbg("ROM read: " .. tostring(ROMSIZE) .. " bytes")
   local d = extractRomData(GAME.family)
   ROM = nil
   collectgarbage()
@@ -1932,6 +1958,7 @@ local function loadGameData()
     species = countKeys(d.species), moves = countKeys(d.moves), abilities = countKeys(d.abilities), items = countKeys(d.items),
     types = countKeys(d.types), maps = countKeys(d.mapsecs), trainers = countKeys(d.trainers), trainerClasses = countKeys(d.trainerClasses),
   }
+  dbg("ROM scan done, writing cache " .. cacheFile)
   local out = io.open(cacheFile, "w")
   if out then out:write("return " .. serializeLua(d) .. "\n"); out:close() end
   for k, v in pairs(d.found) do log(string.format("  %-14s %s (%d)", k, v, d.counts[k == "mapsecs" and "maps" or k] or 0)) end
@@ -1949,6 +1976,7 @@ local function onGameStart()
     warn("This notebook supports Game Boy Advance Pokémon games (Gen 3) only.")
     return
   end
+  dbg("onGameStart: reading game code")
   GAME.code = emu:getGameCode() or ""
   GAME.title = emu:getGameTitle() or ""
   GAME.crc = crcHex()
@@ -1962,27 +1990,36 @@ end
 callbacks:add("start", function() local ok, e = pcall(onGameStart); if not ok then warn(tostring(e)) end end)
 callbacks:add("reset", function() S = nil; BATTLE = nil; PENDING_CATCH = nil end)
 callbacks:add("stop", function() READY = false end)
+local PENDING_START = false
 callbacks:add("frame", function()
   FRAME = FRAME + 1
+  if FRAME == 1 then dbg("first frame") end
+  if PENDING_START then
+    PENDING_START = false
+    dbg("starting game detection")
+    local ok, e = pcall(onGameStart)
+    if not ok then warn(tostring(e)) end
+    dbg("game detection finished")
+  end
   if #toClose > 0 then closePending() end
   if FRAME % CFG.pollFrames == 0 then
     local ok, e = pcall(tick)
     if not ok then warn("tick: " .. tostring(e)) end
   end
-  if FRAME % 60 == 0 then
+  if FRAME % 120 == 0 then
     -- drop stuck connections
     for id, c in pairs(clients) do if FRAME - c.born > 600 then toClose[#toClose + 1] = id end end
-    pcall(drawBuffer)
+    local ok, e = pcall(drawBuffer)
+    if not ok then dbg("drawBuffer: " .. tostring(e)) end
   end
 end)
 
-startServer()
-if emu then
-  local ok, e = pcall(onGameStart)
-  if not ok then warn(tostring(e)) end
-end
-pcall(drawBuffer)
-log("PKMN Adventure Notebook " .. VERSION .. " loaded.")
+dbg("callbacks registered")
+local okServer, errServer = pcall(startServer)
+if not okServer then warn("bridge failed: " .. tostring(errServer)) end
+-- The heavy work (reading the ROM) runs on the first emulated frame, not while mGBA is loading the script
+PENDING_START = (emu ~= nil)
+log("PKMN Adventure Notebook " .. VERSION .. " loaded" .. (PENDING_START and " - reading the game on the next frame..." or " - waiting for a game."))
 
 -- exported for tests. This must stay a global and NOT become a `return` value of the script:
 -- mGBA 0.10 leaves a script's return value on the Lua stack and then crashes on the next frame.
