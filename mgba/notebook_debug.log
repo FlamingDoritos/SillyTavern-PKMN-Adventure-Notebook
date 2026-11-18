@@ -1,0 +1,4 @@
+14:12:37 script start, version 1.2.0, Lua 5.4, dir /home/claude/sillytavern-pkmn-adventure-notebook/mgba/
+14:12:37 callbacks registered
+14:12:37 WARN Could not open port 8888: mock (is another copy of the script running?)
+14:12:37 PKMN Adventure Notebook 1.2.0 loaded - waiting for a game.

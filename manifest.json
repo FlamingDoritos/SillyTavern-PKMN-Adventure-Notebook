@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Loic Poulin (built with Claude)",
-    "version": "1.1.1",
+    "version": "1.2.0",
     "homePage": "https://github.com/FlamingDoritos/SillyTavern-PKMN-Adventure-Notebook",
     "auto_update": false,
     "generate_interceptor": "pkmnNotebookInterceptor"

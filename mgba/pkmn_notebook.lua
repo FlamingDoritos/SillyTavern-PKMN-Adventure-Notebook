@@ -12,7 +12,7 @@
       SillyTavern "PKMN Adventure Notebook" extension.
 ]]
 
-local VERSION = "1.1.2"
+local VERSION = "1.2.0"
 
 ---------------------------------------------------------------------------------------------------
 -- Paths & config
@@ -653,6 +653,61 @@ local function rawStringAt(off, maxLen)
   return table.concat(out)
 end
 
+-- Gender ratios live in the species stats table (vanilla: 28-byte BaseStats, ratio at +16).
+-- Find it via the ROM header pointer and check the values look like real gender ratios.
+local GENDER_OK = { [0] = true, [31] = true, [63] = true, [127] = true, [191] = true, [223] = true, [225] = true, [254] = true, [255] = true }
+local function genderScore(base, stride, off, ids, need)
+  local ok, n, seen = 0, 0, {}
+  for _, i in ipairs(ids) do
+    local v = ru8(base + i * stride + off)
+    if v == nil then return 0 end
+    n = n + 1
+    if GENDER_OK[v] then ok = ok + 1; seen[v] = true
+    elseif n - ok > #ids * (1 - need) then return 0 end
+  end
+  if n == 0 or not seen[255] or not seen[127] or not (seen[0] or seen[254]) then return 0 end
+  return ok / n
+end
+
+local function findGenderTable(speciesNames, speciesTable)
+  local ids = {}
+  for i = 1, 400 do if speciesNames[i] and speciesNames[i] ~= "?" then ids[#ids + 1] = i end end
+  if #ids < 40 then return nil end
+  local quick = {}
+  for k = 1, math.min(#ids, 150) do quick[k] = ids[k] end
+  local bases = {}
+  local hb = romPtrToOff(ru32(0x1BC))
+  if hb then bases[#bases + 1] = hb end
+  -- 1) vanilla layout (28-byte BaseStats). Hacks use custom ratios (any 0-255), so check the
+  --    neighbouring fields instead: HP > 0, growth rate <= 5, egg groups <= 15
+  for _, b in ipairs(bases) do
+    local good = 0
+    for _, i in ipairs(ids) do
+      local e = b + i * 28
+      local hp, growth, eg1, eg2 = ru8(e), ru8(e + 19), ru8(e + 20), ru8(e + 21)
+      if hp and hp > 0 and growth <= 5 and eg1 <= 15 and eg2 <= 15 then good = good + 1 end
+    end
+    if good >= #ids * 0.9 then return { base = b, stride = 28, off = 16, how = "header" } end
+  end
+  -- 2) species info structs that also hold the name: same stride as the name table
+  local strides = {}
+  if speciesTable and speciesTable.mode == "inline" and speciesTable.stride > 28 then
+    strides[#strides + 1] = speciesTable.stride
+    if not hb then bases[#bases + 1] = speciesTable.base - (speciesTable.base % 4) end
+  end
+  for st = 24, 512, 4 do if st ~= 28 then strides[#strides + 1] = st end end
+  for _, b in ipairs(bases) do
+    for _, st in ipairs(strides) do
+      for off = 0, math.min(st, 160) - 1 do
+        if genderScore(b, st, off, quick, 0.95) >= 0.95 and genderScore(b, st, off, ids, 0.95) >= 0.95 then
+          return { base = b, stride = st, off = off, how = "search" }
+        end
+      end
+    end
+  end
+  return nil
+end
+
 local function extractRomData(family)
   local t0 = os.clock()
   local D = { species = {}, moves = {}, abilities = {}, items = {}, types = {}, mapsecs = {}, trainerClasses = {}, trainers = {}, found = {} }
@@ -750,6 +805,19 @@ local function extractRomData(family)
   read("types", 0, 40, 1)
   read("trainerClasses", 0, 256, 0)
   read("mapsecs", mapFrom, 256 - mapFrom, 3)
+
+  -- Gender ratios (for ♂/♀)
+  D.genderRatio = {}
+  local gt = findGenderTable(D.species, T.species)
+  if gt then
+    for i in pairs(D.species) do
+      local v = ru8(gt.base + i * gt.stride + gt.off)
+      if v then D.genderRatio[i] = v end
+    end
+    D.found.gender = string.format("%s @0x%06X stride %d +%d", gt.how, gt.base, gt.stride, gt.off)
+  else
+    D.found.gender = "not found"
+  end
 
   -- Raw class-name bytes (to recognise "LEADER ROXANNE" in battle text)
   local classRaw = {}
@@ -920,6 +988,16 @@ local function readParty(base, count)
   return out
 end
 
+local function monGender(m)
+  if m.isEgg or not DATA or not DATA.genderRatio then return nil end
+  local r = DATA.genderRatio[m.species]
+  if r == nil then return nil end
+  if r == 255 then return "genderless" end
+  if r == 254 then return "female" end
+  if r == 0 then return "male" end
+  return ((m.pid & 0xFF) < r) and "female" or "male"
+end
+
 local function monPublic(m)
   local moves = {}
   for _, mv in ipairs(m.moves) do if mv ~= 0 then moves[#moves + 1] = titleCase(moveName(mv)) end end
@@ -936,7 +1014,7 @@ local function monPublic(m)
     slot = m.slot, species = titleCase(m.speciesName), speciesId = m.species, nickname = titleCase(m.nickname or ""),
     name = monShort(m), level = m.level, hp = m.hp, maxHP = m.maxHP, status = status, isEgg = m.isEgg,
     item = (m.item ~= 0) and titleCase(itemName(m.item)) or nil, moves = setmetatable(moves, json.arrayMT),
-    nature = NATURES[m.nature], shiny = m.shiny or nil,
+    nature = NATURES[m.nature], shiny = m.shiny or nil, gender = monGender(m),
     metAt = mapsecName(m.metLocation) and titleCase(mapsecName(m.metLocation)) or nil, metLevel = m.metLevel,
     friendship = m.friendship,
   }

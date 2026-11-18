@@ -6,7 +6,7 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
@@ -61,6 +61,8 @@ const DEFAULT_SETTINGS = {
     minImportance: 1,
     milestoneCount: 20,
     partyStyle: 'detailed',
+    includeGender: true,
+    includeNature: true,
     categories: Object.fromEntries(Object.keys(CATEGORIES).map(k => [k, k !== 'session'])),
     maxStoredEvents: 4000,
     activeAdventure: null,
@@ -91,6 +93,8 @@ function settings() {
     }
     for (const [k, v] of Object.entries(DEFAULT_PROMPT)) if (s.prompt[k] === undefined) s.prompt[k] = v;
     for (const k of Object.keys(CATEGORIES)) if (s.categories[k] === undefined) s.categories[k] = k !== 'session';
+    if (s.includeGender === undefined) s.includeGender = true;
+    if (s.includeNature === undefined) s.includeNature = true;
     return s;
 }
 function save() { ctx().saveSettingsDebounced(); }
@@ -293,11 +297,16 @@ function partyText(st, style) {
     if (!party.length) return '(no Pokémon yet)';
     return party.map(p => {
         if (p.isEgg) return '- An Egg';
-        const name = p.nickname && p.nickname.toUpperCase() !== (p.species || '').toUpperCase() ? `${p.nickname} (${p.species})` : p.species;
-        if (style === 'short') return `- ${name} Lv${p.level}`;
+        const s = settings();
+        const nick = p.nickname && p.nickname.toUpperCase() !== (p.species || '').toUpperCase();
+        const tags = [];
+        if (nick) tags.push(p.species);
+        if (s.includeGender && p.gender) tags.push(p.gender);
+        const name = nick ? `${p.nickname}${tags.length ? ` (${tags.join(', ')})` : ''}` : `${p.species}${tags.length ? ` (${tags.join(', ')})` : ''}`;
+        if (style === 'short') return `- ${name} Lv${p.level}${s.includeNature && p.nature ? `, ${p.nature} nature` : ''}${p.shiny ? ', shiny' : ''}`;
         const bits = [`Lv${p.level}`, `${p.hp}/${p.maxHP} HP`];
         if (p.status) bits.push(p.status === 'FNT' ? 'fainted' : p.status);
-        if (p.nature) bits.push(`${p.nature} nature`);
+        if (s.includeNature && p.nature) bits.push(`${p.nature} nature`);
         if (p.shiny) bits.push('shiny');
         if (p.item) bits.push(`holding ${p.item}`);
         let line = `- ${name}: ${bits.join(', ')}`;
@@ -429,6 +438,11 @@ function panelHtml() {
         <select id="pkmn_adv_select" class="text_pole"></select>
       </div>
 
+      <details class="pkmn-details" open>
+        <summary><b>Current party</b></summary>
+        <div id="pkmn_party_mini" class="pkmn-party pkmn-party-mini"></div>
+      </details>
+
       <div class="pkmn-row pkmn-scope">
         <label class="checkbox_label" title="Like Author's Note chat-specific settings: this chat gets its own template, position, depth, role and frequency">
           <input type="checkbox" id="pkmn_override"> Use custom settings for this chat</label>
@@ -468,6 +482,10 @@ function panelHtml() {
             <select id="pkmn_minimp" class="text_pole"><option value="0">0 – everything</option><option value="1">1 – normal</option><option value="2">2 – notable</option><option value="3">3 – milestones only</option></select></label>
           <label>Party detail:
             <select id="pkmn_partystyle" class="text_pole"><option value="short">Short</option><option value="detailed">Detailed</option><option value="full">Full (+ where met)</option></select></label>
+        </div>
+        <div class="pkmn-cats">
+          <label class="checkbox_label"><input type="checkbox" id="pkmn_inc_gender"> Gender in party list</label>
+          <label class="checkbox_label"><input type="checkbox" id="pkmn_inc_nature"> Nature in party list</label>
         </div>
         <div class="pkmn-cats">${catBoxes}</div>
       </details>
@@ -650,6 +668,8 @@ function renderNotebook() {
     $('#pkmn_milestones').val(s.milestoneCount);
     $('#pkmn_minimp').val(String(s.minImportance));
     $('#pkmn_partystyle').val(s.partyStyle);
+    $('#pkmn_inc_gender').prop('checked', !!s.includeGender);
+    $('#pkmn_inc_nature').prop('checked', !!s.includeNature);
     $('.pkmn_cat').each(function () { $(this).prop('checked', s.categories[$(this).data('cat')] !== false); });
     refreshAdventureSelect();
     renderPreview();
@@ -719,20 +739,46 @@ function findEvent(key) {
     return a ? a.events.find(e => eventKey(e) === key) : null;
 }
 
+// Built-in sparkle (no icon font needed): one big four-point star and a small one, like the games' shiny sparkle
+const SHINY_ICON = `<span class="pkmn-shiny" title="Shiny!"><svg viewBox="0 0 24 24" width="1em" height="1em" aria-label="Shiny">
+  <path d="M10 1.5 L12.2 7.8 L18.5 10 L12.2 12.2 L10 18.5 L7.8 12.2 L1.5 10 L7.8 7.8 Z" fill="currentColor"/>
+  <path d="M19 14 L20 17 L23 18 L20 19 L19 22 L18 19 L15 18 L18 17 Z" fill="currentColor"/>
+</svg></span>`;
+
+function genderIcon(g) {
+    if (g === 'male') return '<span class="pkmn-gender pkmn-male" title="Male">♂</span>';
+    if (g === 'female') return '<span class="pkmn-gender pkmn-female" title="Female">♀</span>';
+    if (g === 'genderless') return '<span class="pkmn-gender pkmn-genderless" title="Genderless">∅</span>';
+    return '';
+}
+
+function partyCardsHtml(st, compact) {
+    return (st?.party || []).map(p => {
+        const pct = p.maxHP ? Math.round(100 * p.hp / p.maxHP) : 0;
+        const cls = pct > 50 ? 'pkmn-hp-ok' : pct > 20 ? 'pkmn-hp-mid' : 'pkmn-hp-low';
+        const shiny = p.shiny ? SHINY_ICON : '';
+        const details = [];
+        if (!p.isEgg && p.nature) details.push(`${esc(p.nature)} nature`);
+        if (!compact) {
+            details.push(`${p.hp}/${p.maxHP} HP`);
+            if (p.item) details.push(esc(p.item));
+            if (p.moves?.length) details.push(esc(p.moves.join(', ')));
+        }
+        return `<div class="pkmn-mon${p.shiny ? ' pkmn-mon-shiny' : ''}">
+          <div><b>${esc(p.isEgg ? 'Egg' : p.name)}</b>${p.isEgg ? '' : genderIcon(p.gender)}${!p.isEgg && p.name !== p.species ? ` <small>(${esc(p.species)})</small>` : ''} <span class="pkmn-lv">Lv${p.level}${shiny}</span>${p.status ? ` <span class="pkmn-statusbadge">${esc(p.status)}</span>` : ''}</div>
+          <div class="pkmn-hp"><div class="pkmn-hp-fill ${cls}" style="width:${pct}%"></div></div>
+          ${details.length ? `<small class="pkmn-muted">${details.join(' · ')}</small>` : ''}
+        </div>`;
+    }).join('');
+}
+
 function renderStatus() {
     const a = adventure();
     const st = a?.status;
     const $live = $('#pkmn_live');
+    $('#pkmn_party_mini').html(st?.party?.length ? partyCardsHtml(st, true) : '<span class="pkmn-muted">No party data yet — connect to the game.</span>');
     if (!st) { $live.html('<div class="pkmn-muted">No live data yet.</div>'); return; }
-    const party = (st.party || []).map(p => {
-        const pct = p.maxHP ? Math.round(100 * p.hp / p.maxHP) : 0;
-        const cls = pct > 50 ? 'pkmn-hp-ok' : pct > 20 ? 'pkmn-hp-mid' : 'pkmn-hp-low';
-        return `<div class="pkmn-mon">
-          <div><b>${esc(p.isEgg ? 'Egg' : p.name)}</b>${!p.isEgg && p.name !== p.species ? ` <small>(${esc(p.species)})</small>` : ''}${p.shiny ? ' ✨' : ''} <span class="pkmn-muted">Lv${p.level}</span>${p.status ? ` <span class="pkmn-statusbadge">${esc(p.status)}</span>` : ''}</div>
-          <div class="pkmn-hp"><div class="pkmn-hp-fill ${cls}" style="width:${pct}%"></div></div>
-          <small class="pkmn-muted">${p.hp}/${p.maxHP} HP${p.item ? ` · ${esc(p.item)}` : ''}${p.moves?.length ? ` · ${esc(p.moves.join(', '))}` : ''}</small>
-        </div>`;
-    }).join('');
+    const party = partyCardsHtml(st, false);
     $live.html(`
       <div class="pkmn-live-head"><b>${esc(st.player || '')}</b> · ${esc(st.location || '?')} · ${st.badges ?? 0}/8 badges${st.money != null ? ` · ₽${st.money}` : ''}${st.playTime ? ` · ${esc(st.playTime)}` : ''}</div>
       <div class="pkmn-muted">${esc(st.game?.title || '')} [${esc(st.game?.code || '')}] · ${esc(st.game?.profile || '')}${st.game?.ram === 'auto' ? ' · battles tracked from the enemy party' : ''}</div>
@@ -882,6 +928,8 @@ function bind() {
     $('#pkmn_milestones').on('input', function () { settings().milestoneCount = Math.max(0, Number(this.value) || 0); save(); renderPreview(); });
     $('#pkmn_minimp').on('change', function () { settings().minImportance = Number(this.value); save(); renderPreview(); });
     $('#pkmn_partystyle').on('change', function () { settings().partyStyle = this.value; save(); renderPreview(); });
+    $('#pkmn_inc_gender').on('change', function () { settings().includeGender = this.checked; save(); renderPreview(); });
+    $('#pkmn_inc_nature').on('change', function () { settings().includeNature = this.checked; save(); renderPreview(); });
     $p.on('change', '.pkmn_cat', function () { settings().categories[$(this).data('cat')] = this.checked; save(); renderPreview(); });
 
     // Log tab

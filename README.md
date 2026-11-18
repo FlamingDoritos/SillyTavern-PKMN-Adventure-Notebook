@@ -74,7 +74,8 @@ The extension connects to the game by itself and syncs every 5 seconds. The dot 
 | **Placement** | Before Main Prompt / After Main Prompt / In-chat @ Depth, with a System, User or Assistant role. Same as Author's Note. |
 | **Frequency** | Insert every N user messages (0 = off, 1 = always). Shows a countdown like Author's Note. |
 | **Include in World Info scanning** | Lets lorebook entries trigger on the notebook text. |
-| **What goes into the notebook** | How many recent events and milestones to include, the minimum importance, how detailed the party is, and which kinds of events to include. |
+| **Current party** | Your team at a glance: gender (♂ / ♀ / ∅), nature, HP, and a gold sparkle next to the level of shiny Pokémon. |
+| **What goes into the notebook** | How many recent events and milestones to include, the minimum importance, how detailed the party is, whether to include **gender** and **nature**, and which kinds of events to include. |
 | **Preview** | Exactly what will be sent, with a token count. |
 
 ### Log tab
@@ -107,7 +108,7 @@ Browse what the script read out of the ROM: Pokémon, moves, abilities, items, t
 | Growth | level-ups, evolutions, moves learned (and forgotten) |
 | Faints | *Ziggy fainted against Leader Roxanne* (useful for Nuzlockes) |
 | Milestones | badges (with their names), becoming Champion |
-| Live state | location, party (HP, status, moves, nature, item, where met), badges, money, play time, current battle |
+| Live state | location, party (HP, status, moves, gender, nature, shiny, item, where met), badges, money, play time, current battle |
 
 ## How it works with romhacks
 **Names.** Pokémon, moves, items, abilities, types, maps, trainers and trainer classes are read straight out of the ROM. The script tries, in order:
