@@ -1,0 +1,13 @@
+{
+    "display_name": "PKMN Adventure Notebook",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Loic Poulin (built with Claude)",
+    "version": "1.1.0",
+    "homePage": "https://github.com/FlamingDoritos/SillyTavern-PKMN-Adventure-Notebook",
+    "auto_update": false,
+    "generate_interceptor": "pkmnNotebookInterceptor"
+}
