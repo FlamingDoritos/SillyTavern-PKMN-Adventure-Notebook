@@ -6,7 +6,7 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
@@ -562,12 +562,12 @@ function setStatusLine(text) {
 }
 
 function renderConnection() {
-    $('#pkmn_conn_dot').toggleClass('on', connected).attr('title', connected ? 'Connected to mGBA' : `Not connected${lastError ? `: ${lastError}` : ''}`);
+    $('#pkmn_conn_dot').toggleClass('pkmn-on', connected).attr('title', connected ? 'Connected to mGBA' : `Not connected${lastError ? `: ${lastError}` : ''}`);
 }
 
 function showTab(tab) {
     settings().panel.tab = tab; save();
-    $('.pkmn-tab').removeClass('active').filter(`[data-tab="${tab}"]`).addClass('active');
+    $('.pkmn-tab').removeClass('pkmn-active').filter(`[data-tab="${tab}"]`).addClass('pkmn-active');
     $('.pkmn-page').hide().filter(`[data-page="${tab}"]`).show();
     if (tab === 'data') renderData();
     if (tab === 'log') renderLog();
@@ -696,7 +696,7 @@ function renderLog() {
     const rows = list.map(e => {
         const k = esc(eventKey(e));
         const imp = e.imp ?? 1;
-        return `<div class="pkmn-ev imp${imp}${e.hidden ? ' hidden' : ''}${e.pinned ? ' pinned' : ''}" data-key="${k}">
+        return `<div class="pkmn-ev pkmn-imp${imp}${e.hidden ? ' pkmn-ev-hidden' : ''}${e.pinned ? ' pkmn-pinned' : ''}" data-key="${k}">
           <i class="fa-solid ${TYPE_ICONS[e.type] || 'fa-circle'} pkmn-ev-icon" title="${esc(e.type)}"></i>
           <div class="pkmn-ev-main">
             <div class="pkmn-ev-text" title="Click to edit">${esc(e.text)}</div>
@@ -705,7 +705,7 @@ function renderLog() {
           <div class="pkmn-ev-tools">
             <span class="pkmn-imp" title="Importance ${imp}">${'★'.repeat(imp)}${'☆'.repeat(3 - imp)}</span>
             <i class="fa-solid fa-thumbtack pkmn-pin" title="Pin to milestones"></i>
-            <i class="fa-solid ${e.hidden ? 'fa-eye-slash' : 'fa-eye'} pkmn-hide" title="Show/hide in prompt"></i>
+            <i class="fa-solid ${e.hidden ? 'fa-eye-slash' : 'fa-eye'} pkmn-hide" title="${e.hidden ? 'Hidden from the prompt — click to include it again' : 'Included in the prompt — click to hide it from the prompt'}"></i>
             <i class="fa-solid fa-trash-can pkmn-del" title="Delete"></i>
           </div>
         </div>`;
@@ -726,7 +726,7 @@ function renderStatus() {
     if (!st) { $live.html('<div class="pkmn-muted">No live data yet.</div>'); return; }
     const party = (st.party || []).map(p => {
         const pct = p.maxHP ? Math.round(100 * p.hp / p.maxHP) : 0;
-        const cls = pct > 50 ? 'ok' : pct > 20 ? 'mid' : 'low';
+        const cls = pct > 50 ? 'pkmn-hp-ok' : pct > 20 ? 'pkmn-hp-mid' : 'pkmn-hp-low';
         return `<div class="pkmn-mon">
           <div><b>${esc(p.isEgg ? 'Egg' : p.name)}</b>${!p.isEgg && p.name !== p.species ? ` <small>(${esc(p.species)})</small>` : ''}${p.shiny ? ' ✨' : ''} <span class="pkmn-muted">Lv${p.level}</span>${p.status ? ` <span class="pkmn-statusbadge">${esc(p.status)}</span>` : ''}</div>
           <div class="pkmn-hp"><div class="pkmn-hp-fill ${cls}" style="width:${pct}%"></div></div>
@@ -744,7 +744,7 @@ function renderAdventures() {
     const s = settings();
     const sel = adventure();
     const html = Object.values(s.adventures).sort((a, b) => b.updated - a.updated).map(a => `
-      <div class="pkmn-adv${sel && sel.id === a.id ? ' selected' : ''}" data-id="${esc(a.id)}">
+      <div class="pkmn-adv${sel && sel.id === a.id ? ' pkmn-selected' : ''}" data-id="${esc(a.id)}">
         <div><b>${esc(a.player || '?')}</b> — ${esc(a.game || a.gameCode || '')}<br><small class="pkmn-muted">${a.events.length} events · last update ${new Date(a.updated).toLocaleString()}${s.activeAdventure === a.id ? ' · <b>active in game</b>' : ''}</small></div>
         <span class="pkmn-grow"></span>
         <i class="fa-solid fa-pen pkmn-adv-rename" title="Rename player"></i>
