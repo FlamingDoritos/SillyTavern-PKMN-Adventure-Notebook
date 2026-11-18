@@ -32,6 +32,14 @@ return {
   -- Keys: party, partyCount, enemy, sb1ptr, sb2ptr, sb1, sb2, battleType, outcome, opponentA, mapHeader, flagsOff, badgeFlag
   addressOverrides = {},
 
+  -- Optional: name shown for the game. By default the ROM's file name is used (read from mGBA's
+  -- recent-files list in qt.ini). Set this if the wrong name shows, e.g. romName = "Pokemon Unbound",
+  romName = nil,
+
+  -- Optional: folder containing mGBA's qt.ini, if it isn't found automatically.
+  -- e.g. mgbaFolder = [[C:\Users\me\Documents\emulators\mGBA-0.10.2-win64]],
+  mgbaFolder = nil,
+
   -- Optional: badge names for your romhack (8 entries). Leave nil to use the base game's names.
   badgeNames = nil,
 }

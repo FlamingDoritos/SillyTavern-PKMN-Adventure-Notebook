@@ -6,13 +6,13 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
 const ROLE = { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
 
-const DEFAULT_TEMPLATE = `[Pokémon Adventure Notebook — a record of what has actually happened in {{player}}'s playthrough of {{game}}. Keep the story consistent with it.]
+const OLD_DEFAULT_TEMPLATE = `[Pokémon Adventure Notebook — a record of what has actually happened in {{player}}'s playthrough of {{game}}. Keep the story consistent with it.]
 Current location: {{location}} | Badges: {{badges}} | Play time: {{playtime}}
 {{battle}}
 Party:
@@ -25,11 +25,41 @@ Recent events:
 {{recent}}
 {{notes}}`;
 
+const DEFAULT_TEMPLATE = `[Pokémon Adventure Notebook — a record of what has actually happened in {{player}}'s playthrough of {{game}}. Keep the story consistent with it.]
+Location: {{location}}
+Badges: {{badges}}
+Play time: {{playtime}}
+{{battle}}
+Party:
+{{party}}
+
+Milestones:
+{{milestones}}
+
+Recent events:
+{{recent}}
+{{notes}}`;
+
+// "Notebook contents" switches -> the placeholders they control
+const SECTIONS = {
+    player: { label: "Player's name", vars: ['player'] },
+    location: { label: 'Location', vars: ['location', 'visited'] },
+    badges: { label: 'Badges', vars: ['badges', 'badge_count'] },
+    playtime: { label: 'Play time', vars: ['playtime'] },
+    party: { label: 'Party', vars: ['party', 'party_short', 'party_full'] },
+    milestones: { label: 'Milestones', vars: ['milestones'] },
+    recent: { label: 'Recent events', vars: ['recent', 'last_event'] },
+};
+
+const AI_SYSTEM_PROMPT = 'You keep a notebook for a role-play that follows a real Pokémon game playthrough. Use only the facts you are given; never invent events, Pokémon or places. Write compactly, in the same language as the facts.';
+
 const CATEGORIES = {
     travel: { label: 'Travel', types: ['location'] },
     trainer: { label: 'Trainer battles', types: ['battle_won', 'battle_lost', 'battle_draw', 'battle_end'] },
     wild: { label: 'Wild encounters', types: ['wild_encounter', 'wild_defeated', 'wild_fled', 'wild_escaped'] },
-    party: { label: 'Catches & party', types: ['catch', 'party_join', 'party_leave', 'hatch', 'nickname'] },
+    party: { label: 'Catches & party', types: ['catch', 'party_join', 'party_leave', 'hatch', 'nickname', 'pc_deposit', 'pc_withdraw'] },
+    items: { label: 'Shopping & key items', types: ['shop', 'key_item'] },
+    heal: { label: 'Healing', types: ['heal'] },
     growth: { label: 'Level-ups & evolutions', types: ['level_up', 'evolution'] },
     moves: { label: 'Moves learned', types: ['move_learned'] },
     faint: { label: 'Faints', types: ['faint'] },
@@ -46,6 +76,7 @@ const TYPE_ICONS = {
     catch: 'fa-circle-dot', party_join: 'fa-user-plus', party_leave: 'fa-user-minus', hatch: 'fa-egg', nickname: 'fa-tag',
     level_up: 'fa-arrow-up', evolution: 'fa-dna', move_learned: 'fa-bolt', faint: 'fa-heart-crack', badge: 'fa-medal',
     champion: 'fa-crown', note: 'fa-pen', manual: 'fa-pen-nib', session: 'fa-gamepad',
+    heal: 'fa-kit-medical', pc_deposit: 'fa-box-archive', pc_withdraw: 'fa-box-open', shop: 'fa-store', key_item: 'fa-key',
 };
 
 const DEFAULT_PROMPT = { position: POS.IN_PROMPT, depth: 4, role: ROLE.SYSTEM, interval: 1, scan: false };
@@ -64,6 +95,9 @@ const DEFAULT_SETTINGS = {
     includeGender: true,
     includeNature: true,
     showWildNatures: true,
+    sections: Object.fromEntries(Object.keys(SECTIONS).map(k => [k, true])),
+    mode: 'live',
+    aiRecentEvents: 60,
     categories: Object.fromEntries(Object.keys(CATEGORIES).map(k => [k, k !== 'session'])),
     maxStoredEvents: 4000,
     activeAdventure: null,
@@ -97,6 +131,10 @@ function settings() {
     if (s.includeGender === undefined) s.includeGender = true;
     if (s.includeNature === undefined) s.includeNature = true;
     if (s.showWildNatures === undefined) s.showWildNatures = true;
+    if (!s.sections) s.sections = {};
+    for (const k of Object.keys(SECTIONS)) if (s.sections[k] === undefined) s.sections[k] = true;
+    if (!s.mode) s.mode = 'live';
+    if (s.template === OLD_DEFAULT_TEMPLATE) s.template = DEFAULT_TEMPLATE;
     return s;
 }
 function save() { ctx().saveSettingsDebounced(); }
@@ -161,7 +199,7 @@ function ensureAdventure(id, status) {
     }
     const a = s.adventures[id];
     if (status) {
-        a.game = status.game?.title || a.game;
+        a.game = status.game?.file || status.game?.title || a.game;
         a.gameCode = status.game?.code || a.gameCode;
         a.profile = status.game?.profile || a.profile;
         a.player = status.player || status.adventure?.player || a.player;
@@ -372,7 +410,7 @@ function buildVars(a, notes) {
     const badgeList = st.badgeList?.length ? ` (${st.badgeList.join(', ')})` : '';
     return {
         player: st.player || a?.player || '{{user}}',
-        game: a?.game || st.game?.title || 'Pokémon',
+        game: st.game?.file || a?.game || st.game?.title || 'Pokémon',
         location: st.location || 'unknown',
         badges: `${st.badges ?? 0}/8${badgeList}`,
         badge_count: String(st.badges ?? 0),
@@ -391,7 +429,28 @@ function buildVars(a, notes) {
     };
 }
 
+// Lines whose placeholders belong to a switched-off section are dropped, together with a
+// "Heading:" line right above them. The player's name is replaced instead ("the player").
+function applySections(template, vars) {
+    const sec = settings().sections || {};
+    const off = new Set();
+    for (const [k, def] of Object.entries(SECTIONS)) if (sec[k] === false) def.vars.forEach(v => off.add(v));
+    if (sec.player === false) { vars.player = 'the player'; off.delete('player'); }
+    const lines = template.split('\n');
+    const out = [];
+    for (const line of lines) {
+        const keys = [...line.matchAll(/\{\{(\w+)\}\}/g)].map(x => x[1]);
+        if (keys.some(k => off.has(k))) {
+            if (out.length && /:\s*$/.test(out[out.length - 1]) && !/\{\{/.test(out[out.length - 1])) out.pop();
+            continue;
+        }
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
 function renderTemplate(template, vars) {
+    template = applySections(template, vars);
     let text = template.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars ? vars[k] : m));
     text = text.replace(/\n{3,}/g, '\n\n').trim();
     try { text = ctx().substituteParams(text); } catch { /* ignore */ }
@@ -402,7 +461,69 @@ function buildNotebook() {
     const eff = effective();
     const a = adventure(eff.adventureId);
     if (!a) return '';
+    if (settings().mode === 'ai' && a.ai?.text) {
+        const vars = buildVars(a, eff.notes);
+        if (settings().sections?.player === false) vars.player = 'the player';
+        const parts = [`[Pokémon Adventure Notebook — ${vars.player}'s playthrough of ${vars.game}. Keep the story consistent with it.]`, a.ai.text.trim()];
+        if (vars.battle) parts.push(vars.battle);
+        if (vars.notes) parts.push(vars.notes);
+        let text = parts.join('\n\n');
+        try { text = ctx().substituteParams(text); } catch { /* ignore */ }
+        return text;
+    }
     return renderTemplate(eff.template, buildVars(a, eff.notes));
+}
+
+// Facts sent to the AI: everything the switches allow, with a longer event history
+function buildFacts(a) {
+    const s = settings();
+    const vars = buildVars(a, '');
+    const evs = visibleEvents(a).slice(-Math.max(10, Number(s.aiRecentEvents) || 60));
+    vars.recent = evs.length ? evs.map(eventLine).join('\n') : '(nothing yet)';
+    vars.battle = '';
+    const factsTemplate = DEFAULT_TEMPLATE.split('\n').slice(1).join('\n');
+    return renderTemplate(factsTemplate, vars);
+}
+
+let aiBusy = false;
+async function updateNotebookWithAI() {
+    const a = adventure();
+    if (!a) { toastr.warning('No adventure yet — connect to the game first.', 'Adventure Notebook'); return; }
+    if (aiBusy) return;
+    const c = ctx();
+    const s = settings();
+    const wanted = Object.entries(SECTIONS).filter(([k]) => s.sections[k] !== false).map(([, d]) => d.label);
+    const prompt = [
+        'Facts recorded from the game:',
+        '<facts>', buildFacts(a), '</facts>',
+        a.ai?.text ? `\nThe current notebook (update it; keep what is still true, replace what changed):\n<notebook>\n${a.ai.text}\n</notebook>` : '',
+        `\nWrite the updated adventure notebook. Cover only: ${wanted.join(', ')}. Use short headings and bullet points, summarise older events into a few lines of story so far, keep recent events specific. Stay under 300 words. Output only the notebook.`,
+    ].join('\n');
+    aiBusy = true;
+    $('#pkmn_ai_update').addClass('disabled').find('span').text('Writing…');
+    try {
+        let text = '';
+        if (typeof c.generateRaw === 'function') {
+            text = await c.generateRaw({ prompt, systemPrompt: AI_SYSTEM_PROMPT, responseLength: 600 });
+        } else if (typeof c.generateQuietPrompt === 'function') {
+            text = await c.generateQuietPrompt({ quietPrompt: `${AI_SYSTEM_PROMPT}\n\n${prompt}`, responseLength: 600 });
+        } else {
+            throw new Error('This SillyTavern version has no generation API for extensions.');
+        }
+        text = String(text || '').trim();
+        if (!text) throw new Error('The AI returned an empty answer.');
+        a.ai = { text, updated: Date.now() };
+        s.mode = 'ai';
+        save();
+        renderNotebook();
+        toastr.success('Notebook updated by the AI.', 'Adventure Notebook');
+    } catch (err) {
+        console.error('[Adventure Notebook] AI update failed', err);
+        toastr.error(String(err?.message || err), 'AI update failed');
+    } finally {
+        aiBusy = false;
+        $('#pkmn_ai_update').removeClass('disabled').find('span').text('Update notebook with AI');
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -487,7 +608,23 @@ function panelHtml() {
         <small id="pkmn_scope_label" class="pkmn-muted"></small>
       </div>
 
-      <label for="pkmn_template"><b>Notebook template</b> <small class="pkmn-muted">placeholders: {{party}} {{recent}} {{milestones}} {{location}} {{badges}} {{battle}} {{caught}} {{visited}} {{player}} {{game}} {{money}} {{playtime}} {{notes}} {{party_short}} {{party_full}} {{last_event}} — ST macros like {{user}}/{{char}} work too</small></label>
+      <div class="pkmn-details pkmn-contents">
+        <b>Notebook contents</b> <small class="pkmn-muted">(what goes into the notebook, both modes)</small>
+        <div class="pkmn-cats">${Object.entries(SECTIONS).map(([k, d]) => `<label class="checkbox_label"><input type="checkbox" class="pkmn_sec" data-sec="${k}"> ${d.label}</label>`).join('')}</div>
+        <div class="pkmn-row" style="margin-top:6px">
+          <b>Mode</b>
+          <label class="checkbox_label" title="Rebuilt from the game log before every message"><input type="radio" name="pkmn_mode" value="live"> Live (template)</label>
+          <label class="checkbox_label" title="A summary written by your connected AI; refresh it with the button"><input type="radio" name="pkmn_mode" value="ai"> AI-written</label>
+          <span class="pkmn-grow"></span>
+          <div id="pkmn_ai_update" class="menu_button menu_button_icon" title="Send the game facts to the AI you're connected to and let it rewrite the notebook"><i class="fa-solid fa-wand-magic-sparkles"></i> <span>Update notebook with AI</span></div>
+        </div>
+        <div id="pkmn_ai_box">
+          <small id="pkmn_ai_info" class="pkmn-muted"></small>
+          <textarea id="pkmn_ai_text" class="text_pole textarea_compact" rows="8" placeholder="Press “Update notebook with AI” to have your connected AI write the notebook from the game log. You can edit the result."></textarea>
+        </div>
+      </div>
+
+      <label for="pkmn_template"><b>Notebook template</b> <small class="pkmn-muted">(Live mode)</small> <small class="pkmn-muted">placeholders: {{party}} {{recent}} {{milestones}} {{location}} {{badges}} {{battle}} {{caught}} {{visited}} {{player}} {{game}} {{money}} {{playtime}} {{notes}} {{party_short}} {{party_full}} {{last_event}} — ST macros like {{user}}/{{char}} work too</small></label>
       <textarea id="pkmn_template" class="text_pole textarea_compact" rows="9"></textarea>
       <div class="pkmn-row"><div id="pkmn_template_reset" class="menu_button">Reset template</div><span class="pkmn-grow"></span><small id="pkmn_tokens" class="pkmn-muted"></small></div>
 
@@ -707,6 +844,12 @@ function renderNotebook() {
     $('#pkmn_milestones').val(s.milestoneCount);
     $('#pkmn_minimp').val(String(s.minImportance));
     $('#pkmn_partystyle').val(s.partyStyle);
+    $('.pkmn_sec').each(function () { $(this).prop('checked', s.sections[$(this).data('sec')] !== false); });
+    $(`input[name="pkmn_mode"][value="${s.mode}"]`).prop('checked', true);
+    const advAI = adventure()?.ai;
+    $('#pkmn_ai_box').toggle(s.mode === 'ai');
+    $('#pkmn_ai_text').val(advAI?.text || '');
+    $('#pkmn_ai_info').text(advAI?.updated ? `Last written by the AI: ${new Date(advAI.updated).toLocaleString()} — edit freely, it is used as-is.` : 'Not written yet.');
     $('#pkmn_inc_gender').prop('checked', !!s.includeGender);
     $('#pkmn_inc_nature').prop('checked', !!s.includeNature);
     $('.pkmn_cat').each(function () { $(this).prop('checked', s.categories[$(this).data('cat')] !== false); });
@@ -820,7 +963,7 @@ function renderStatus() {
     const party = partyCardsHtml(st, false);
     $live.html(`
       <div class="pkmn-live-head"><b>${esc(st.player || '')}</b> · ${esc(st.location || '?')} · ${st.badges ?? 0}/8 badges${st.money != null ? ` · ₽${st.money}` : ''}${st.playTime ? ` · ${esc(st.playTime)}` : ''}</div>
-      <div class="pkmn-muted">${esc(st.game?.title || '')} [${esc(st.game?.code || '')}] · ${esc(st.game?.profile || '')}${st.game?.ram === 'auto' ? ' · battles tracked from the enemy party' : ''}</div>
+      <div class="pkmn-muted">${esc(st.game?.file || st.game?.title || '')}${st.game?.file && st.game?.title ? ` <small title="Name stored inside the ROM (romhacks usually keep their base game's)">(internal name: ${esc(st.game.title)})</small>` : ''} [${esc(st.game?.code || '')}] · ${esc(st.game?.profile || '')}${st.game?.ram === 'auto' ? ' · battles tracked from the enemy party' : ''}</div>
       ${st.battle ? `<div class="pkmn-battle">${esc(battleText(st))}</div>` : ''}
       <div class="pkmn-party">${party || '<span class="pkmn-muted">No Pokémon yet</span>'}</div>`);
 }
@@ -847,7 +990,7 @@ function renderData() {
     const found = data.found || {};
     const foundKey = cat === 'maps' ? 'mapsecs' : cat;
     const list = data[cat] || [];
-    $('#pkmn_data_info').text(`${data.game?.title || ''} — ${list.length} entries (${found[foundKey] || '?'})`);
+    $('#pkmn_data_info').text(`${adventure()?.status?.game?.file || data.game?.title || ''} — ${list.length} entries (${found[foundKey] || '?'})`);
     const rows = list.filter(r => !q || JSON.stringify(r).toLowerCase().includes(q)).slice(0, 1500).map(r => {
         if (cat === 'trainers') return `<div class="pkmn-data-row"><span class="pkmn-id">#${r.id}</span> ${esc(r.class)} <b>${esc(r.name)}</b>${r.size ? ` <small class="pkmn-muted">${r.size} Pokémon</small>` : ''}</div>`;
         return `<div class="pkmn-data-row"><span class="pkmn-id">#${r.id}</span> ${esc(r.name)}</div>`;
@@ -967,6 +1110,13 @@ function bind() {
     $('#pkmn_milestones').on('input', function () { settings().milestoneCount = Math.max(0, Number(this.value) || 0); save(); renderPreview(); });
     $('#pkmn_minimp').on('change', function () { settings().minImportance = Number(this.value); save(); renderPreview(); });
     $('#pkmn_partystyle').on('change', function () { settings().partyStyle = this.value; save(); renderPreview(); });
+    $p.on('change', '.pkmn_sec', function () { settings().sections[$(this).data('sec')] = this.checked; save(); renderPreview(); });
+    $('input[name="pkmn_mode"]').on('change', function () { settings().mode = this.value; save(); renderNotebook(); });
+    $('#pkmn_ai_update').on('click', updateNotebookWithAI);
+    $('#pkmn_ai_text').on('input', function () {
+        const a = adventure(); if (!a) return;
+        a.ai = { ...(a.ai || {}), text: this.value, updated: a.ai?.updated || Date.now() }; save(); renderPreview();
+    });
     $('#pkmn_inc_gender').on('change', function () { settings().includeGender = this.checked; save(); renderPreview(); });
     $('#pkmn_inc_nature').on('change', function () { settings().includeNature = this.checked; save(); renderPreview(); });
     $p.on('change', '.pkmn_cat', function () { settings().categories[$(this).data('cat')] = this.checked; save(); renderPreview(); });

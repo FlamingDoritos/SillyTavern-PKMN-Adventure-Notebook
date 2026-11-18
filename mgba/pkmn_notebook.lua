@@ -12,7 +12,7 @@
       SillyTavern "PKMN Adventure Notebook" extension.
 ]]
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 
 ---------------------------------------------------------------------------------------------------
 -- Paths & config
@@ -35,6 +35,8 @@ local CFG = {
   forceProfile = nil,
   addressOverrides = {},
   badgeNames = nil,
+  romName = nil,
+  mgbaFolder = nil,
 }
 do
   local f = loadfile(SCRIPT_DIR .. "notebook_config.lua")
@@ -806,6 +808,15 @@ local function extractRomData(family)
   read("trainerClasses", 0, 256, 0)
   read("mapsecs", mapFrom, 256 - mapFrom, 3)
 
+  -- Key items (vanilla 44-byte Item struct: pocket byte at +26, 5 = key items)
+  D.keyItems = {}
+  if T.items and T.items.mode == "inline" and T.items.stride == 44 then
+    for i in pairs(D.items) do
+      local o = T.items:nameOffset(i)
+      if o and ru8(o + 26) == 5 then D.keyItems[i] = true end
+    end
+  end
+
   -- Gender ratios (for ♂/♀)
   D.genderRatio = {}
   local gt = findGenderTable(D.species, T.species)
@@ -871,7 +882,7 @@ end
 -- RAM helpers
 ---------------------------------------------------------------------------------------------------
 local P = nil -- active profile (table of addresses)
-local GAME = { code = "", title = "", crc = "", family = "?", profileName = "?" }
+local GAME = { code = "", title = "", crc = "", family = "?", profileName = "?", file = nil, fileTries = 0 }
 
 local function r8(a) return emu:read8(a) end
 -- The GBA bus rounds unaligned 16/32-bit reads down, so read unaligned values byte by byte
@@ -1174,6 +1185,130 @@ local function readLocation()
   return { group = group, num = num, mapsec = mapsec, name = name or string.format("Map %d.%d", group, num) }
 end
 
+-- Bag ----------------------------------------------------------------------------------------------
+-- Pockets are {u16 item, u16 quantity XOR key}. Their layout comes from the ROM header (pocket sizes
+-- and the PC-items offset); hacks that moved the bag elsewhere are found by scanning for item slots.
+local BAG = { regions = nil, gen = 0, lastScan = -100000, itemMax = 0 }
+
+local function bagKey()
+  local b2 = sb2(); if not b2 then return 0 end
+  if P.family == "FR" then return r32(b2 + 0xF20) & 0xFFFF end
+  if P.family == "E" then return r32(b2 + 0xAC) & 0xFFFF end
+  return 0
+end
+
+local function headerPockets()
+  if not (P.family == "E" or P.family == "FR") then return nil end
+  local c = {}
+  for i = 0, 5 do c[i] = emu.memory.cart0:read8(0x1E4 + i) end
+  local pcOff = emu.memory.cart0:read32(0x1EC)
+  if pcOff == 0 or pcOff > 0x4000 then return nil end
+  local off = pcOff + c[5] * 4
+  local regions = {}
+  for i = 0, 4 do
+    if c[i] > 0 then regions[#regions + 1] = { off = off, n = c[i], rel = true, key = (i == 1) } end
+    off = off + c[i] * 4
+  end
+  return regions
+end
+
+local function readRegions(regions, key)
+  local items, keys, used, bad = {}, {}, 0, 0
+  local b1 = sb1()
+  for _, reg in ipairs(regions) do
+    local base = reg.rel and (b1 and b1 + reg.off) or (not reg.rel and reg.off)
+    if base then
+      local raw = rrange(base, reg.n * 4)
+      for k = 0, reg.n - 1 do
+        local id, q = string.unpack("<I2I2", raw, k * 4 + 1)
+        if id ~= 0 then
+          q = q ~ key
+          if id < BAG.itemMax and q >= 1 and q <= 999 then
+            items[id] = (items[id] or 0) + q; used = used + 1
+            if reg.key then keys[id] = true end
+          else
+            bad = bad + 1
+          end
+        end
+      end
+    end
+  end
+  return items, keys, used, bad
+end
+
+local function scanForBag(key)
+  local b1 = sb1()
+  local ew = rrange(0x02000000, 0x40000)
+  local regions, total = {}, 0
+  local a = 0
+  while a <= #ew - 16 do
+    local n = 0
+    while a + n * 4 + 4 <= #ew do
+      local id, q = string.unpack("<I2I2", ew, a + n * 4 + 1)
+      q = q ~ key
+      if id >= 1 and id < BAG.itemMax and q >= 1 and q <= 999 then n = n + 1 else break end
+    end
+    if n >= 4 then
+      local addr = 0x02000000 + a
+      if b1 and addr >= b1 and addr < b1 + 0x4000 then
+        regions[#regions + 1] = { off = addr - b1, n = n, rel = true }
+      else
+        regions[#regions + 1] = { off = addr, n = n, rel = false }
+      end
+      total = total + n
+      a = a + n * 4
+    else
+      a = a + 4
+    end
+    if total > 1000 then break end
+  end
+  if total >= 6 then return regions end
+  return nil
+end
+
+local function readBag(progressed)
+  if BAG.itemMax == 0 then return nil end
+  local key = bagKey()
+  if not BAG.regions then
+    local hp = headerPockets()
+    if hp then
+      local _, _, used, bad = readRegions(hp, key)
+      -- an all-empty bag in a game that is clearly under way means the hack moved the bag
+      if bad == 0 and (used > 0 or not progressed) then BAG.regions = hp; BAG.gen = BAG.gen + 1 end
+    end
+    if not BAG.regions and FRAME - BAG.lastScan > 1800 then
+      BAG.lastScan = FRAME
+      local found = scanForBag(key)
+      if found then BAG.regions = found; BAG.gen = BAG.gen + 1; log("Bag found by scanning memory (this game moved it)") end
+    end
+    if not BAG.regions then return nil end
+  end
+  local items, keys = readRegions(BAG.regions, key)
+  return { items = items, keys = keys, gen = BAG.gen }
+end
+
+-- PC boxes (gPokemonStoragePtr sits right after gSaveBlock2Ptr): set of personality values
+local function storagePids()
+  if not P.sb2ptr then return nil end
+  local st = r32(P.sb2ptr + 4)
+  if st < 0x02000000 or st >= 0x02040000 then return nil end
+  local raw = rrange(st + 4, 14 * 30 * 80)
+  local set = {}
+  for k = 0, 14 * 30 - 1 do
+    local pid = string.unpack("<I4", raw, k * 80 + 1)
+    if pid ~= 0 then set[pid] = true end
+  end
+  return set
+end
+local PCSET = nil
+
+local function readLayoutId()
+  if not P.mapHeader then return nil end
+  local l = r32(P.mapHeader)
+  if l < 0x08000000 or l >= 0x0A000000 then return nil end
+  return r16(P.mapHeader + 0x12)
+end
+
 local function takeSnapshot()
   local b2 = sb2()
   if not b2 then return nil end
@@ -1183,10 +1318,13 @@ local function takeSnapshot()
   if count > 6 then count = 6 end
   local party = readParty(P.party, count)
   local loc = readLocation()
-  return {
+  local snap = {
     player = player, tid = tid, party = party, badges = readBadges(),
-    location = loc, loc = loc and loc.name, money = readMoney(),
+    location = loc, loc = loc and loc.name, money = readMoney(), layout = readLayoutId(),
   }
+  local okBag, bag = pcall(readBag, snap.badges ~= 0 or #party >= 2)
+  if okBag then snap.bag = bag end
+  return snap
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1367,6 +1505,9 @@ local function diffParty(old, new)
         PENDING_CATCH.foundFrame = FRAME
       elseif m.isEgg then
         addEvent("party_join", "Received a Pokémon Egg", 2, { egg = true })
+      elseif PCSET and PCSET[m.pid] then
+        addEvent("pc_withdraw", string.format("Withdrew %s (Lv%d) from the PC", monDisplayName(m), m.level), 1,
+          { species = titleCase(m.speciesName), level = m.level })
       else
         addEvent("party_join", string.format("%s (Lv%d) joined the party", monDisplayName(m), m.level), 2,
           { species = titleCase(m.speciesName), level = m.level })
@@ -1414,15 +1555,131 @@ local function diffParty(old, new)
     end
   end
   -- departures
+  local nowInPC = nil
   for _, o in ipairs(old) do
     if not newBy[o.key] then
-      addEvent("party_leave", string.format("%s (Lv%d) left the party", monDisplayName(o), o.level), 1,
-        { species = titleCase(o.speciesName), level = o.level })
+      if nowInPC == nil then nowInPC = storagePids() or false end
+      if nowInPC and nowInPC[o.pid] then
+        addEvent("pc_deposit", string.format("Deposited %s (Lv%d) in the PC", monDisplayName(o), o.level), 1,
+          { species = titleCase(o.speciesName), level = o.level })
+      else
+        addEvent("party_leave", string.format("%s (Lv%d) left the party", monDisplayName(o), o.level), 1,
+          { species = titleCase(o.speciesName), level = o.level })
+      end
+    end
+  end
+  if nowInPC then PCSET = nowInPC end
+
+  -- whole party healed (Pokémon Center, Mom, healing NPCs): several hurt Pokémon all back to full at once
+  if not BATTLE and #new > 0 then
+    local healed, allFull = 0, true
+    for _, m in ipairs(new) do
+      if not m.isEgg then
+        if m.hp < m.maxHP or (m.status or 0) ~= 0 then allFull = false end
+        local o = oldBy[m.key]
+        if o and o.level == m.level and (o.hp < o.maxHP or (o.status or 0) ~= 0) and m.hp == m.maxHP and (m.status or 0) == 0 then
+          healed = healed + 1
+        end
+      end
+    end
+    if allFull and (healed >= 2 or (healed == 1 and #new == 1)) then
+      addEvent("heal", "The whole party was healed", 1, { healed = healed })
     end
   end
 end
 
 local BADGES_ORDINAL = { "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth" }
+
+-- Shopping & key items ------------------------------------------------------------------------------
+local MART_LAYOUTS = {}
+local SHOP = nil
+local function martFile() return (ensureDir(SCRIPT_DIR .. "data/") and (SCRIPT_DIR .. "data/") or (SCRIPT_DIR .. "notebook_")) .. "marts_" .. sanitizeFile(GAME.code .. "_" .. GAME.crc) .. ".txt" end
+local function loadMarts()
+  MART_LAYOUTS = {}
+  local f = io.open(martFile(), "r")
+  if f then for line in f:lines() do local n = tonumber(line); if n then MART_LAYOUTS[n] = true end end; f:close() end
+end
+local function learnMart(layout)
+  if not layout or MART_LAYOUTS[layout] then return end
+  MART_LAYOUTS[layout] = true
+  local f = io.open(martFile(), "a")
+  if f then f:write(layout, "\n"); f:close() end
+end
+
+local function itemPhrase(id, qty)
+  local name = titleCase(itemName(id))
+  if qty == 1 then
+    return ((name:match("^[AEIOUaeiou]") and "an " or "a ") .. name)
+  end
+  local plural = name
+  if not name:match("[sS]$") then
+    if name:match("[^aeiouAEIOU]y$") then plural = name:sub(1, -2) .. "ies"
+    elseif name:match("[^aeiouAEIOU]Y$") then plural = name:sub(1, -2) .. "IES"
+    elseif name:match("%u$") and not name:match("%l") then plural = name .. "S"
+    else plural = name .. "s" end
+  end
+  return ((qty <= 5) and "some " or "many ") .. plural
+end
+
+local function listPhrase(t)
+  local parts = {}
+  local ids = {}
+  for id in pairs(t) do ids[#ids + 1] = id end
+  table.sort(ids)
+  for _, id in ipairs(ids) do parts[#parts + 1] = itemPhrase(id, t[id]) end
+  if #parts <= 1 then return parts[1] or "" end
+  return table.concat(parts, ", ", 1, #parts - 1) .. " and " .. parts[#parts]
+end
+
+local function shopText(sh)
+  local t = "Visited the Poké Mart in " .. (sh.where or "?")
+  local b, so = next(sh.bought) ~= nil, next(sh.sold) ~= nil
+  if b then t = t .. " and bought " .. listPhrase(sh.bought) end
+  if so then t = t .. (b and ", and sold " or " and sold ") .. listPhrase(sh.sold) end
+  return t
+end
+
+local function diffItems(old, new)
+  local mapKey = new.location and (new.location.group .. "." .. new.location.num) or "?"
+  local oldKey = old.location and (old.location.group .. "." .. old.location.num) or "?"
+  if mapKey ~= oldKey then
+    SHOP = nil
+    if new.layout and MART_LAYOUTS[new.layout] then
+      SHOP = { map = mapKey, where = new.loc, bought = {}, sold = {} }
+      SHOP.seq = addEvent("shop", shopText(SHOP), 0, { visit = true })
+    end
+  end
+  if BATTLE or not old.bag or not new.bag or old.bag.gen ~= new.bag.gen then return end
+  local gains, losses = {}, {}
+  for id, q in pairs(new.bag.items) do
+    local d = q - (old.bag.items[id] or 0)
+    if d > 0 then gains[id] = d end
+  end
+  for id, q in pairs(old.bag.items) do
+    local d = q - (new.bag.items[id] or 0)
+    if d > 0 then losses[id] = d end
+  end
+  -- key items
+  for id in pairs(gains) do
+    if not old.bag.items[id] and (DATA.keyItems[id] or new.bag.keys[id]) then
+      addEvent("key_item", "Obtained the " .. titleCase(itemName(id)) .. " (key item)", 2, { item = titleCase(itemName(id)) })
+      gains[id] = nil
+    end
+  end
+  local dm = (new.money and old.money) and (new.money - old.money) or 0
+  local bought = (dm < 0 and next(gains) ~= nil)
+  local sold = (dm > 0 and next(losses) ~= nil)
+  if not bought and not sold then return end
+  if not SHOP or SHOP.map ~= mapKey then
+    SHOP = { map = mapKey, where = new.loc, bought = {}, sold = {} }
+  end
+  learnMart(new.layout)
+  if bought then for id, d in pairs(gains) do SHOP.bought[id] = (SHOP.bought[id] or 0) + d end end
+  if sold then for id, d in pairs(losses) do SHOP.sold[id] = (SHOP.sold[id] or 0) + d end end
+  local data = { visit = true, spent = nil }
+  if SHOP.seq and updateEvent(SHOP.seq, shopText(SHOP), 1, data) then return end
+  SHOP.seq = addEvent("shop", shopText(SHOP), 1, data)
+end
 
 local function diffSnapshot(old, new)
   -- location
@@ -1448,6 +1705,8 @@ local function diffSnapshot(old, new)
     end
   end
   diffParty(old.party, new.party)
+  local okItems, errItems = pcall(diffItems, old, new)
+  if not okItems then dbg("diffItems: " .. tostring(errItems)) end
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1743,6 +2002,8 @@ local function tick()
 
   diffSnapshot(S, snap)
   S = snap
+  -- remember who is in the PC (after diffing, so a withdrawal is still recognised this tick)
+  if not BATTLE and (PCSET == nil or FRAME % 120 < CFG.pollFrames) then PCSET = storagePids() or PCSET end
 
   -- resolve catches
   if PENDING_CATCH then
@@ -1768,7 +2029,7 @@ end
 local function statusTable()
   local st = {
     ok = true, version = VERSION, ready = READY,
-    game = { code = GAME.code, title = GAME.title, crc = GAME.crc, profile = GAME.profileName, family = GAME.family, ram = RAMSTATE.mode },
+    game = { code = GAME.code, title = GAME.title, crc = GAME.crc, profile = GAME.profileName, family = GAME.family, ram = RAMSTATE.mode, file = GAME.file },
     data = DATA and {
       species = DATA.counts and DATA.counts.species or 0, found = DATA.found,
     } or json.null,
@@ -1978,7 +2239,7 @@ local function drawBuffer()
   local lines = {}
   local function add(t) lines[#lines + 1] = t end
   add(string.format("PKMN Adventure Notebook v%s | port %d | %s", VERSION, CFG.port, server and "bridge ON" or "bridge OFF"))
-  add(string.format("Game: %s [%s] %s", GAME.title, GAME.code, GAME.profileName))
+  add(string.format("Game: %s [%s] %s", GAME.file or GAME.title, GAME.code, GAME.profileName))
   if not READY then add("Waiting for a game...")
   elseif not ADV or not S then add("Waiting for a save file to be loaded...")
   else
@@ -2006,6 +2267,47 @@ end
 ---------------------------------------------------------------------------------------------------
 -- Game detection
 ---------------------------------------------------------------------------------------------------
+-- mGBA's Lua API doesn't expose the ROM's file name, but mGBA lists recent ROMs in qt.ini.
+-- Take the first entry whose size and header match the running game.
+local function findRomFileName()
+  if CFG.romName then return CFG.romName end
+  local candidates = { "qt.ini", SCRIPT_DIR .. "qt.ini", SCRIPT_DIR .. "../qt.ini", SCRIPT_DIR .. "../../qt.ini" }
+  if CFG.mgbaFolder then table.insert(candidates, 1, (CFG.mgbaFolder:gsub("[/\\]?$", "/")) .. "qt.ini") end
+  local appdata = os.getenv("APPDATA")
+  if appdata then candidates[#candidates + 1] = appdata .. "/mGBA/qt.ini" end
+  local home = os.getenv("HOME")
+  if home then candidates[#candidates + 1] = home .. "/.config/mgba/qt.ini" end
+  local size = emu:romSize()
+  local header = emu.memory.cart0:readRange(0xA0, 0x20)
+  for _, ini in ipairs(candidates) do
+    local f = io.open(ini, "r")
+    if f then
+      local inMru, paths = false, {}
+      for line in f:lines() do
+        local sec = line:match("^%[(.-)%]")
+        if sec then inMru = (sec == "mru") end
+        if inMru then
+          local idx, path = line:match("^(%d+)=(.+)$")
+          if idx then paths[#paths + 1] = { tonumber(idx), (path:gsub('^"(.*)"$', "%1")) } end
+        end
+      end
+      f:close()
+      table.sort(paths, function(a, b) return a[1] < b[1] end)
+      for _, pth in ipairs(paths) do
+        local rf = io.open(pth[2], "rb")
+        if rf then
+          local fsize = rf:seek("end")
+          local ok = false
+          if fsize == size then rf:seek("set", 0xA0); ok = (rf:read(0x20) == header) end
+          rf:close()
+          if ok then return (pth[2]:match("([^/\\]+)$") or pth[2]):gsub("%.[^.]*$", "") end
+        end
+      end
+    end
+  end
+  return nil
+end
+
 local function crcHex()
   local ok, sum = pcall(function() return emu:checksum(C.CHECKSUM.CRC32) end)
   if not ok or not sum then dbg("checksum unavailable"); return "00000000" end
@@ -2125,6 +2427,14 @@ local function onGameStart()
   log(string.format("Game: %s [%s] -> %s memory profile", GAME.title, GAME.code, GAME.profileName))
   local ok, d = pcall(loadGameData)
   if ok then DATA = d else warn("ROM scan failed: " .. tostring(d)); DATA = { species = {}, moves = {}, abilities = {}, items = {}, types = {}, mapsecs = {}, trainerClasses = {}, trainers = {}, found = {} } end
+  DATA.keyItems = DATA.keyItems or {}
+  BAG.regions, BAG.lastScan, BAG.itemMax = nil, -100000, 0
+  for i in pairs(DATA.items or {}) do if i + 1 > BAG.itemMax then BAG.itemMax = i + 1 end end
+  PCSET, SHOP = nil, nil
+  pcall(loadMarts)
+  GAME.file, GAME.fileTries = nil, 0
+  local okName, name = pcall(findRomFileName)
+  if okName and name then GAME.file = name; log("ROM file: " .. name) end
   READY = true
 end
 
@@ -2143,6 +2453,11 @@ callbacks:add("frame", function()
     dbg("game detection finished")
   end
   if #toClose > 0 then closePending() end
+  if READY and not GAME.file and GAME.fileTries < 20 and FRAME % 180 == 0 then
+    GAME.fileTries = GAME.fileTries + 1
+    local okName, name = pcall(findRomFileName)
+    if okName and name then GAME.file = name; log("ROM file: " .. name) end
+  end
   if FRAME % CFG.pollFrames == 0 then
     local ok, e = pcall(tick)
     if not ok then warn("tick: " .. tostring(e)) end

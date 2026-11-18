@@ -69,6 +69,9 @@ The extension connects to the game by itself and syncs every 5 seconds. The dot 
 | **Enabled in this chat** | Per-chat on/off. *On for new chats* (Game tab) sets the default. |
 | **Adventure for this chat** | Choose which playthrough this chat follows. "Active game adventure" follows whatever is running in mGBA. |
 | **Use custom settings for this chat** | Gives this chat its own template, placement, depth, role and frequency, like Author's Note's chat-specific note. With it off, you edit the defaults for all chats. |
+| **Notebook contents** | Switch each part on or off: player's name, location, badges, play time, party, milestones, recent events. A switched-off part disappears from the notebook, together with its heading (player's name off → "the player"). Applies to both modes. |
+| **Mode: Live / AI-written** | *Live* rebuilds the notebook from the template before every message. *AI-written* uses a summary written by the AI SillyTavern is connected to. |
+| **Update notebook with AI** | Sends the game facts (only the parts you switched on, with a longer event history) and the previous AI notebook to your connected AI, which writes an updated notebook. The result is shown in an editable box and stays saved per adventure. Press it again whenever you want it refreshed. Your chat notes and the current battle are still added live. |
 | **Notebook template** | The text that gets injected. Placeholders: `{{party}}` `{{party_short}}` `{{party_full}}` `{{recent}}` `{{milestones}}` `{{location}}` `{{badges}}` `{{battle}}` `{{caught}}` `{{visited}}` `{{player}}` `{{game}}` `{{money}}` `{{playtime}}` `{{last_event}}` `{{notes}}`. SillyTavern macros (`{{user}}`, `{{char}}`, …) also work. |
 | **Chat notes** | Your own notes for this chat (Nuzlocke rules, story beats, relationships). They fill `{{notes}}`. |
 | **Placement** | Before Main Prompt / After Main Prompt / In-chat @ Depth, with a System, User or Assistant role. Same as Author's Note. |
@@ -109,6 +112,10 @@ Browse what the script read out of the ROM: Pokémon, moves, abilities, items, t
 | Growth | level-ups, evolutions, moves learned (and forgotten) |
 | Faints | *Ziggy fainted against Leader Roxanne* (useful for Nuzlockes) |
 | Milestones | badges (with their names), becoming Champion |
+| Healing | *The whole party was healed* (Pokémon Center, mom, healers…) |
+| PC | *Deposited Ziggy (Lv8) in the PC* · *Withdrew Ziggy (Lv8) from the PC* |
+| Poké Mart | *Visited the Poké Mart in Oldale Town and bought some Potions and a Repel*. Quantities are generalized: 1 = "a", 2–5 = "some", more = "many". Sales are noted too. A Mart is recognized after the first purchase made in it; from then on, visits without buying are logged as well. |
+| Key items | *Obtained the Mach Bike (key item)* |
 | Live state | location, party (HP, status, moves, gender, nature, shiny, item, where met), badges, money, play time, current battle |
 
 ## How it works with romhacks
@@ -133,6 +140,9 @@ Results are cached in `mgba\data\`, so the scan only happens once per ROM (under
 | Pokémon Odyssey | ✓ custom region | exact | stores Pokémon unencrypted (CFRU), supported |
 | Pokémon Pisces, Pokémon Hodgepodge | ✓ 1400+ species | auto-detected | battles tracked from the enemy party |
 | Emerald Seaglass, Lazarus, Wishes of Tomorrow, Monomyth, Super Mariomon | ✓ names | auto-detected (expected) | no savestates to test memory with; Mariomon's trainer list wasn't found, so trainer names come from battle text only |
+
+### Game name
+The Game tab and the notebook use the **ROM's file name** (e.g. *Pokemon Pisces*) instead of the name stored inside the ROM, which romhacks usually leave as their base game. The script reads it from mGBA's recent-files list (`qt.ini`). If it shows the internal name instead, set `romName` in `notebook_config.lua`, or `mgbaFolder` if your `qt.ini` lives somewhere unusual.
 
 ### Overrides
 * `symFile` in `notebook_config.lua`: a decomp hack's `.sym` file gives exact RAM addresses, including exact battle tracking.

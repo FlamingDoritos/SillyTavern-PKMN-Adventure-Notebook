@@ -119,3 +119,9 @@
 .pkmn-party-mini { margin-top: 4px; }
 .pkmn-party-mini .pkmn-mon { padding: 3px 6px; }
 @keyframes pkmn-twinkle { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .65; transform: scale(.85); } }
+
+/* Notebook contents / AI */
+.pkmn-contents { display: flex; flex-direction: column; gap: 2px; }
+#pkmn_ai_box { margin-top: 4px; }
+#pkmn_ai_box textarea { width: 100%; }
+#pkmn_ai_update.disabled { opacity: .5; pointer-events: none; }
