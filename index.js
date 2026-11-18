@@ -6,7 +6,7 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
@@ -28,7 +28,7 @@ Recent events:
 const CATEGORIES = {
     travel: { label: 'Travel', types: ['location'] },
     trainer: { label: 'Trainer battles', types: ['battle_won', 'battle_lost', 'battle_draw', 'battle_end'] },
-    wild: { label: 'Wild battles', types: ['wild_defeated', 'wild_fled', 'wild_escaped'] },
+    wild: { label: 'Wild encounters', types: ['wild_encounter', 'wild_defeated', 'wild_fled', 'wild_escaped'] },
     party: { label: 'Catches & party', types: ['catch', 'party_join', 'party_leave', 'hatch', 'nickname'] },
     growth: { label: 'Level-ups & evolutions', types: ['level_up', 'evolution'] },
     moves: { label: 'Moves learned', types: ['move_learned'] },
@@ -41,7 +41,7 @@ const TYPE_TO_CATEGORY = {};
 for (const [cat, def] of Object.entries(CATEGORIES)) for (const t of def.types) TYPE_TO_CATEGORY[t] = cat;
 
 const TYPE_ICONS = {
-    location: 'fa-map-location-dot', battle_won: 'fa-trophy', battle_lost: 'fa-skull', battle_draw: 'fa-handshake',
+    location: 'fa-map-location-dot', wild_encounter: 'fa-paw', battle_won: 'fa-trophy', battle_lost: 'fa-skull', battle_draw: 'fa-handshake',
     battle_end: 'fa-flag', wild_defeated: 'fa-paw', wild_fled: 'fa-person-running', wild_escaped: 'fa-wind',
     catch: 'fa-circle-dot', party_join: 'fa-user-plus', party_leave: 'fa-user-minus', hatch: 'fa-egg', nickname: 'fa-tag',
     level_up: 'fa-arrow-up', evolution: 'fa-dna', move_learned: 'fa-bolt', faint: 'fa-heart-crack', badge: 'fa-medal',
@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS = {
     partyStyle: 'detailed',
     includeGender: true,
     includeNature: true,
+    showWildNatures: true,
     categories: Object.fromEntries(Object.keys(CATEGORIES).map(k => [k, k !== 'session'])),
     maxStoredEvents: 4000,
     activeAdventure: null,
@@ -95,6 +96,7 @@ function settings() {
     for (const k of Object.keys(CATEGORIES)) if (s.categories[k] === undefined) s.categories[k] = k !== 'session';
     if (s.includeGender === undefined) s.includeGender = true;
     if (s.includeNature === undefined) s.includeNature = true;
+    if (s.showWildNatures === undefined) s.showWildNatures = true;
     return s;
 }
 function save() { ctx().saveSettingsDebounced(); }
@@ -167,16 +169,29 @@ function ensureAdventure(id, status) {
     return a;
 }
 
+const eventRev = (e) => (typeof e.rev === 'number' ? e.rev : (typeof e.seq === 'number' ? e.seq : 0));
+
 function mergeEvents(a, events) {
-    const known = new Set(a.events.map(eventKey));
+    const known = new Map(a.events.map(e => [eventKey(e), e]));
     let added = 0;
     for (const e of events) {
         const k = eventKey(e);
-        if (known.has(k)) continue;
-        known.add(k);
+        const existing = known.get(k);
+        if (existing) {
+            // an event the game updated (e.g. a wild encounter that now has its result)
+            if (eventRev(e) > eventRev(existing)) {
+                const keep = { hidden: existing.hidden, pinned: existing.pinned, deleted: existing.deleted, edited: existing.edited, impEdited: existing.impEdited, imp: existing.imp, text: existing.text };
+                Object.assign(existing, e);
+                for (const key of ['hidden', 'pinned', 'deleted', 'edited', 'impEdited']) if (keep[key] !== undefined) existing[key] = keep[key];
+                if (keep.impEdited) existing.imp = keep.imp;
+                if (keep.edited) { existing.original = e.text; existing.text = keep.text; }
+                added++;
+            }
+            continue;
+        }
+        known.set(k, e);
         a.events.push({ ...e });
         added++;
-        if (typeof e.seq === 'number' && e.seq > a.lastSeq) a.lastSeq = e.seq;
     }
     if (added) {
         a.events.sort((x, y) => (x.t - y.t) || ((x.seq || 0) - (y.seq || 0)));
@@ -209,6 +224,7 @@ async function sync({ manual = false } = {}) {
         if (status.adventure.seq < a.lastSeq) a.lastSeq = 0; // log was reset on the game side
         const ev = await getJson(`/events?since=${a.lastSeq}&adventure=${encodeURIComponent(a.id)}`, 8000);
         const added = mergeEvents(a, ev.events || []);
+        if (typeof ev.seq === 'number' && ev.seq > a.lastSeq) a.lastSeq = ev.seq;
         a.status = status;
         a.updated = Date.now();
         if (s.activeAdventure !== a.id) {
@@ -286,10 +302,32 @@ function visibleEvents(a) {
     return a.events.filter(e => !e.hidden && s.categories[TYPE_TO_CATEGORY[e.type] || 'notes'] !== false);
 }
 
+// Text shown in the log and the prompt. Wild encounters are rebuilt from their data so the
+// "Wild natures" option can show or hide the nature (unless you edited the text yourself).
+function eventText(e) {
+    const d = e.data;
+    if (e.type === 'wild_encounter' && !e.edited && d && d.species) {
+        const bits = [`Lv${d.level}`];
+        if (settings().showWildNatures && d.nature) bits.push(`${d.nature} nature`);
+        let t = `Encountered a wild ${d.shiny ? 'shiny ' : ''}${d.species} (${bits.join(', ')})`;
+        if (d.result) t += ` — ${d.result}`;
+        return t;
+    }
+    return e.text || '';
+}
+
+function eventIcon(e) {
+    if (e.type === 'wild_encounter') {
+        return { caught: 'fa-circle-dot', ran: 'fa-person-running', fled: 'fa-wind', lost: 'fa-skull', defeated: 'fa-paw' }[e.data?.outcome] || 'fa-binoculars';
+    }
+    return TYPE_ICONS[e.type] || 'fa-circle';
+}
+
 function eventLine(e) {
-    const where = e.loc && !/^Arrived|^Returned/.test(e.text) && !(e.text || '').includes(e.loc) ? ` [${e.loc}]` : '';
+    const text = eventText(e);
+    const where = e.loc && !/^Arrived|^Returned/.test(text) && !text.includes(e.loc) ? ` [${e.loc}]` : '';
     const when = e.pt ? `(${e.pt}) ` : '';
-    return `- ${when}${e.text}${where}`;
+    return `- ${when}${text}${where}`;
 }
 
 function partyText(st, style) {
@@ -346,9 +384,9 @@ function buildVars(a, notes) {
         battle: battleText(st),
         recent: recent.length ? recent.map(eventLine).join('\n') : '(nothing yet)',
         milestones: milestones.length ? milestones.map(eventLine).join('\n') : '(none yet)',
-        caught: caught.length ? caught.map(e => `- ${e.text}`).join('\n') : '(none yet)',
+        caught: caught.length ? caught.map(e => `- ${eventText(e)}`).join('\n') : '(none yet)',
         visited: visited.length ? visited.join(', ') : '(none yet)',
-        last_event: evs.length ? evs[evs.length - 1].text : '',
+        last_event: evs.length ? eventText(evs[evs.length - 1]) : '',
         notes: notes ? `Notes: ${notes}` : '',
     };
 }
@@ -502,6 +540,7 @@ function panelHtml() {
         <input id="pkmn_log_search" class="text_pole" placeholder="Search..." style="flex:1">
         <select id="pkmn_log_cat" class="text_pole" style="flex:0 0 auto;width:auto"><option value="all">All</option>${Object.entries(CATEGORIES).map(([k, d]) => `<option value="${k}">${d.label}</option>`).join('')}</select>
         <label class="checkbox_label" title="Show events you hid from the prompt"><input type="checkbox" id="pkmn_log_hidden"> hidden</label>
+        <label class="checkbox_label" title="Show the nature of wild Pokémon you encounter (in the log and in the prompt)"><input type="checkbox" id="pkmn_wild_natures"> Wild natures</label>
       </div>
       <div class="pkmn-row">
         <input id="pkmn_manual_text" class="text_pole" placeholder="Add your own entry (story beat, decision, rule...)" style="flex:1">
@@ -710,16 +749,16 @@ function renderLog() {
     let list = a.events.filter(e => !e.deleted &&
         (logFilter.showHidden || !e.hidden) &&
         (logFilter.category === 'all' || TYPE_TO_CATEGORY[e.type] === logFilter.category) &&
-        (!q || (e.text || '').toLowerCase().includes(q) || (e.loc || '').toLowerCase().includes(q)));
+        (!q || eventText(e).toLowerCase().includes(q) || (e.loc || '').toLowerCase().includes(q)));
     const total = list.length;
     list = list.slice(-logLimit).reverse();
     const rows = list.map(e => {
         const k = esc(eventKey(e));
         const imp = e.imp ?? 1;
         return `<div class="pkmn-ev pkmn-imp${imp}${e.hidden ? ' pkmn-ev-hidden' : ''}${e.pinned ? ' pkmn-pinned' : ''}" data-key="${k}">
-          <i class="fa-solid ${TYPE_ICONS[e.type] || 'fa-circle'} pkmn-ev-icon" title="${esc(e.type)}"></i>
+          <i class="fa-solid ${eventIcon(e)} pkmn-ev-icon" title="${esc(e.type)}"></i>
           <div class="pkmn-ev-main">
-            <div class="pkmn-ev-text" title="Click to edit">${esc(e.text)}</div>
+            <div class="pkmn-ev-text" title="Click to edit">${esc(eventText(e))}</div>
             <div class="pkmn-ev-meta">${esc(fmtTime(e))}${e.loc ? ` · ${esc(e.loc)}` : ''}${e.edited ? ' · edited' : ''}${e.manual ? ' · manual' : ''}</div>
           </div>
           <div class="pkmn-ev-tools">
@@ -936,6 +975,7 @@ function bind() {
     $('#pkmn_log_search').on('input', function () { logFilter.text = this.value; renderLog(); });
     $('#pkmn_log_cat').on('change', function () { logFilter.category = this.value; renderLog(); });
     $('#pkmn_log_hidden').prop('checked', logFilter.showHidden).on('change', function () { logFilter.showHidden = this.checked; renderLog(); });
+    $('#pkmn_wild_natures').prop('checked', settings().showWildNatures !== false).on('change', function () { settings().showWildNatures = this.checked; save(); renderLog(); renderPreview(); });
     const addManual = () => {
         const text = String($('#pkmn_manual_text').val() || '').trim();
         const a = adventure();
@@ -952,18 +992,18 @@ function bind() {
         if ($t.find('textarea').length) return;
         const e = findEvent($t.closest('.pkmn-ev').data('key'));
         if (!e) return;
-        const $ta = $('<textarea class="text_pole textarea_compact" rows="2"></textarea>').val(e.text);
+        const $ta = $('<textarea class="text_pole textarea_compact" rows="2"></textarea>').val(eventText(e));
         $t.empty().append($ta); $ta.trigger('focus');
         const commit = () => {
             const v = String($ta.val()).trim();
-            if (v && v !== e.text) { if (!e.original) e.original = e.text; e.text = v; e.edited = true; save(); renderPreview(); }
+            if (v && v !== eventText(e)) { if (!e.original) e.original = e.text; e.text = v; e.edited = true; save(); renderPreview(); }
             renderLog();
         };
         $ta.on('blur', commit).on('keydown', (ev) => { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); $ta.trigger('blur'); } if (ev.key === 'Escape') renderLog(); });
     });
     $('#pkmn_log').on('click', '.pkmn-imp', function () {
         const e = findEvent($(this).closest('.pkmn-ev').data('key')); if (!e) return;
-        e.imp = ((e.imp ?? 1) + 1) % 4; save(); renderLog(); renderPreview();
+        e.imp = ((e.imp ?? 1) + 1) % 4; e.impEdited = true; save(); renderLog(); renderPreview();
     });
     $('#pkmn_log').on('click', '.pkmn-pin', function () {
         const e = findEvent($(this).closest('.pkmn-ev').data('key')); if (!e) return;

@@ -12,7 +12,7 @@
       SillyTavern "PKMN Adventure Notebook" extension.
 ]]
 
-local VERSION = "1.2.0"
+local VERSION = "1.3.0"
 
 ---------------------------------------------------------------------------------------------------
 -- Paths & config
@@ -1050,20 +1050,51 @@ local function ensureDir(path)
   return false
 end
 
-local function addEvent(etype, text, imp, data)
-  if not ADV then return end
-  ADV.seq = ADV.seq + 1
-  local ev = {
-    seq = ADV.seq, t = os.time(), pt = playTime(), type = etype, imp = imp or 1,
-    text = text, loc = currentLocName(), data = data,
-  }
-  local line = json.encode(ev)
-  ADV.events[#ADV.events + 1] = line
+-- Every event carries a revision number ("rev"). Updating an event (e.g. adding the outcome of a wild
+-- encounter) gives it a new rev, so SillyTavern picks up changed events as well as new ones.
+local function writeEventLine(line)
   if CFG.writeLogFile and ADV.file then
     local f = io.open(ADV.file, "a")
     if f then f:write(line, "\n"); f:close() end
   end
+end
+
+local function addEvent(etype, text, imp, data)
+  if not ADV then return end
+  ADV.seq = ADV.seq + 1
+  ADV.rev = ADV.rev + 1
+  local ev = {
+    seq = ADV.seq, rev = ADV.rev, t = os.time(), pt = playTime(), type = etype, imp = imp or 1,
+    text = text, loc = currentLocName(), data = data,
+  }
+  local line = json.encode(ev)
+  ADV.events[#ADV.events + 1] = line
+  ADV.index[ev.seq] = #ADV.events
+  ADV.objs[ev.seq] = ev
+  writeEventLine(line)
   log(text)
+  return ev.seq
+end
+
+-- Change an event logged earlier in this session. The log file gets the new version appended
+-- (when the file is read back, the last line for a given seq wins).
+local function updateEvent(seq, text, imp, dataPatch)
+  if not ADV or not seq then return false end
+  local ev, idx = ADV.objs[seq], ADV.index[seq]
+  if not ev or not idx then return false end
+  ADV.rev = ADV.rev + 1
+  ev.rev = ADV.rev
+  if text then ev.text = text end
+  if imp then ev.imp = imp end
+  if dataPatch then
+    ev.data = ev.data or {}
+    for k, v in pairs(dataPatch) do ev.data[k] = v end
+  end
+  local line = json.encode(ev)
+  ADV.events[idx] = line
+  writeEventLine(line)
+  log(ev.text)
+  return true
 end
 
 local function sanitizeFile(s) return (s:gsub("[^%w%-_]", "_")) end
@@ -1071,7 +1102,7 @@ local function sanitizeFile(s) return (s:gsub("[^%w%-_]", "_")) end
 local function openAdventure(player, tid)
   local id = string.format("%s-%s-%05d", GAME.code ~= "" and GAME.code or "GBA", sanitizeFile(player ~= "" and player or "Player"), tid & 0xFFFF)
   if ADV and ADV.id == id then return false end
-  ADV = { id = id, player = player, tid = tid & 0xFFFF, sid = tid >> 16, events = {}, seq = 0 }
+  ADV = { id = id, player = player, tid = tid & 0xFFFF, sid = tid >> 16, events = {}, seq = 0, rev = 0, index = {}, objs = {} }
   VISITED = {}
   local dir = SCRIPT_DIR .. "logs/"
   if not ensureDir(dir) then dir = SCRIPT_DIR end
@@ -1081,8 +1112,15 @@ local function openAdventure(player, tid)
     for line in f:lines() do
       local seq = tonumber(line:match('"seq":(%d+)'))
       if seq then
-        ADV.events[#ADV.events + 1] = line
+        local rev = tonumber(line:match('"rev":(%d+)')) or seq
+        if ADV.index[seq] then
+          ADV.events[ADV.index[seq]] = line -- a later version of the same event
+        else
+          ADV.events[#ADV.events + 1] = line
+          ADV.index[seq] = #ADV.events
+        end
         if seq > ADV.seq then ADV.seq = seq end
+        if rev > ADV.rev then ADV.rev = rev end
         if line:find('"type":"location"', 1, true) then
           local loc = line:match('"to":"(.-)"')
           if loc then VISITED[loc] = true end
@@ -1184,6 +1222,24 @@ local function enemyListText(list)
   return table.concat(parts, ", ")
 end
 
+-- Wild battles: log the encounter when it starts, fill in the result when it ends
+local function wildEncounterText(lead, result)
+  local bits = { "Lv" .. lead.level }
+  if NATURES[lead.nature] then bits[#bits + 1] = NATURES[lead.nature] .. " nature" end
+  local t = string.format("Encountered a wild %s%s (%s)", lead.shiny and "shiny " or "", titleCase(lead.speciesName), table.concat(bits, ", "))
+  if result then t = t .. " — " .. result end
+  return t
+end
+
+local function logWildEncounter(B)
+  local lead = B.enemies and B.enemies[1]
+  if B.isTrainer or not lead or not CFG.logWildBattles then return end
+  B.encounterSeq = addEvent("wild_encounter", wildEncounterText(lead), lead.shiny and 3 or 0, {
+    species = titleCase(lead.speciesName), level = lead.level, nature = NATURES[lead.nature],
+    shiny = lead.shiny or nil, gender = monGender(lead), double = B.isDouble or nil,
+  })
+end
+
 local function startBattle(enemyLead)
   local flags = r32(P.battleType)
   local isTrainer = (flags & 0x8) ~= 0
@@ -1198,6 +1254,7 @@ local function startBattle(enemyLead)
     BATTLE.trainerId = id
     BATTLE.trainer = trainerInfo(id)
   end
+  logWildEncounter(BATTLE)
 end
 
 local function trainerLabel(t, id)
@@ -1240,21 +1297,25 @@ local function endBattle(outcome)
       addEvent("battle_end", string.format("Battle with %s ended", who), imp, data)
     end
   else
-    local wild = lead and string.format("wild %s (Lv%d)", titleCase(lead.speciesName), lead.level) or "wild Pokémon"
-    if lead and lead.shiny then wild = "SHINY " .. wild; data.shiny = true end
-    local imp = (lead and lead.shiny) and 3 or 0
-    if outcome == 7 then
-      PENDING_CATCH = { mon = lead, frame = FRAME, loc = B.loc, data = data }
-    elseif outcome == 1 then
-      if CFG.logWildBattles then addEvent("wild_defeated", "Defeated a " .. wild, imp, data) end
-    elseif outcome == 2 or outcome == 9 then
-      addEvent("battle_lost", "Was defeated by a " .. wild .. " and blacked out", 2, data)
-    elseif outcome == 4 or outcome == 5 then
-      if CFG.logWildBattles then addEvent("wild_fled", "Ran away from a " .. wild, imp, data) end
-    elseif outcome == 6 or outcome == 10 then
-      if CFG.logWildBattles then addEvent("wild_escaped", "A " .. wild .. " fled", imp, data) end
-    elseif outcome == 8 then
-      if CFG.logWildBattles then addEvent("wild_escaped", "Ran out of Safari Balls facing a " .. wild, imp, data) end
+    if outcome == 7 then PENDING_CATCH = { mon = lead, frame = FRAME, loc = B.loc, data = data } end
+    if not lead then return end
+    local results = {
+      [1] = { "defeated it", "defeated" }, [2] = { "blacked out", "lost" }, [9] = { "blacked out", "lost" },
+      [4] = { "ran away", "ran" }, [5] = { "ran away", "ran" }, [6] = { "it fled", "fled" }, [10] = { "it fled", "fled" },
+      [7] = { "caught it!", "caught" }, [8] = { "ran out of Safari Balls", "fled" },
+    }
+    local r = results[outcome]
+    if not r then return end
+    local imp = lead.shiny and 3 or ((outcome == 2 or outcome == 9) and 2 or 0)
+    local patch = { result = r[1], outcome = r[2] }
+    if CFG.logWildBattles or outcome == 2 or outcome == 9 then
+      -- update the encounter logged at the start; if it wasn't (script started mid-battle), log it now
+      if not updateEvent(B.encounterSeq, wildEncounterText(lead, r[1]), imp, patch) then
+        addEvent("wild_encounter", wildEncounterText(lead, r[1]), imp, {
+          species = titleCase(lead.speciesName), level = lead.level, nature = NATURES[lead.nature],
+          shiny = lead.shiny or nil, gender = monGender(lead), result = r[1], outcome = r[2],
+        })
+      end
     end
   end
 end
@@ -1599,6 +1660,7 @@ local function heuristicBattle(snap)
     if BATTLE then endBattle(BATTLE.isTrainer and 0 or 4) end
     local isTrainer = lead.otid ~= snap.tid -- wild Pokémon carry the player's trainer ID
     BATTLE = { isTrainer = isTrainer, enemies = enemies, startFrame = FRAME, loc = currentLocName(), fainted = {}, pos = pos, heuristic = true, textTries = 0 }
+    logWildEncounter(BATTLE)
     if isTrainer then BATTLE.textBaseline = trainerTextMatches(); BATTLE.classBaseline = trainerTextFromClasses() end
     return
   end
@@ -1711,7 +1773,7 @@ local function statusTable()
       species = DATA.counts and DATA.counts.species or 0, found = DATA.found,
     } or json.null,
   }
-  if ADV then st.adventure = { id = ADV.id, player = titleCase(ADV.player), tid = ADV.tid, seq = ADV.seq, events = #ADV.events } end
+  if ADV then st.adventure = { id = ADV.id, player = titleCase(ADV.player), tid = ADV.tid, seq = ADV.rev, events = #ADV.events } end
   if S then
     local party = {}
     for _, m in ipairs(S.party) do party[#party + 1] = monPublic(m) end
@@ -1800,12 +1862,13 @@ local function handleRequest(req)
     local parts = {}
     if ADV and (not want or want == ADV.id) then
       for _, line in ipairs(ADV.events) do
-        local seq = tonumber(line:match('"seq":(%d+)'))
-        if seq and seq > since then parts[#parts + 1] = line end
+        local rev = tonumber(line:match('"rev":(%d+)')) or tonumber(line:match('"seq":(%d+)'))
+        if rev and rev > since then parts[#parts + 1] = line end
       end
     end
+    -- "seq" here is the sync cursor (highest revision), kept under the old name for compatibility
     local body = string.format('{"ok":true,"adventure":%s,"seq":%d,"events":[%s]}',
-      ADV and json.str(ADV.id) or "null", ADV and ADV.seq or 0, table.concat(parts, ","))
+      ADV and json.str(ADV.id) or "null", ADV and ADV.rev or 0, table.concat(parts, ","))
     return httpResponse(200, body)
   elseif route == "/data" then
     return httpResponse(200, json.encode(dataTable()))
