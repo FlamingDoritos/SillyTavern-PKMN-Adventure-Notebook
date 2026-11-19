@@ -71,7 +71,7 @@ The extension connects to the game by itself and syncs every 5 seconds. The dot 
 | **Use custom settings for this chat** | Gives this chat its own template, placement, depth, role and frequency, like Author's Note's chat-specific note. With it off, you edit the defaults for all chats. |
 | **Notebook contents** | Switch each part on or off: player's name, location, badges, play time, party, milestones, recent events. A switched-off part disappears from the notebook, together with its heading (player's name off → "the player"). Applies to both modes. |
 | **Mode: Live / AI-written** | *Live* rebuilds the notebook from the template before every message. *AI-written* uses a summary written by the AI SillyTavern is connected to. |
-| **Update notebook with AI** | Sends the game facts (only the parts you switched on, with a longer event history) and the previous AI notebook to your connected AI, which writes an updated notebook. The result is shown in an editable box and stays saved per adventure. Press it again whenever you want it refreshed. Your chat notes and the current battle are still added live. |
+| **Update notebook with AI** | Sends the game facts (only the parts you switched on, with a longer event history) and the previous AI notebook to your connected AI, which writes an updated notebook. The result is shown in an editable box and stays saved per adventure. Press it again whenever you want it refreshed. **AI reply length** (default 2000 tokens) caps the answer; reasoning / thinking models need it high enough to think and then write. If the direct request comes back empty, the extension retries through your normal chat preset. Your chat notes and the current battle are still added live. |
 | **Notebook template** | The text that gets injected. Placeholders: `{{party}}` `{{party_short}}` `{{party_full}}` `{{recent}}` `{{milestones}}` `{{location}}` `{{badges}}` `{{battle}}` `{{caught}}` `{{visited}}` `{{player}}` `{{game}}` `{{money}}` `{{playtime}}` `{{last_event}}` `{{notes}}`. SillyTavern macros (`{{user}}`, `{{char}}`, …) also work. |
 | **Chat notes** | Your own notes for this chat (Nuzlocke rules, story beats, relationships). They fill `{{notes}}`. |
 | **Placement** | Before Main Prompt / After Main Prompt / In-chat @ Depth, with a System, User or Assistant role. Same as Author's Note. |
@@ -161,6 +161,7 @@ The Game tab and the notebook use the **ROM's file name** (e.g. *Pokemon Pisces*
 | Battles in an auto-detected hack | In auto-detected mode a battle is only finalised once you win, lose, catch, or take a step. If a trainer name is missing, the battle text wasn't readable. A `.sym` file gives exact tracking. |
 | Scripting window says "waiting" | Load your save (Continue). On a brand-new game, tracking starts once you have your first Pokémon. |
 | mGBA closes when loading the script | Open `notebook_debug.log` next to the script. Its last line shows the step mGBA reached. Please open an issue with that file. |
+| "AI update failed" | Make sure a chat is open and a normal message works. With a reasoning / thinking model, raise **AI reply length** on the Notebook tab, or lower the reasoning effort. The browser console (F12) shows each attempt's error. |
 | Need to rescan the ROM | Delete the matching file in `mgba\data\`. |
 
 ## Files

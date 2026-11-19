@@ -6,7 +6,7 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
@@ -98,6 +98,7 @@ const DEFAULT_SETTINGS = {
     sections: Object.fromEntries(Object.keys(SECTIONS).map(k => [k, true])),
     mode: 'live',
     aiRecentEvents: 60,
+    aiResponseLength: 2000,
     categories: Object.fromEntries(Object.keys(CATEGORIES).map(k => [k, k !== 'session'])),
     maxStoredEvents: 4000,
     activeAdventure: null,
@@ -134,6 +135,7 @@ function settings() {
     if (!s.sections) s.sections = {};
     for (const k of Object.keys(SECTIONS)) if (s.sections[k] === undefined) s.sections[k] = true;
     if (!s.mode) s.mode = 'live';
+    if (!s.aiResponseLength) s.aiResponseLength = 2000;
     if (s.template === OLD_DEFAULT_TEMPLATE) s.template = DEFAULT_TEMPLATE;
     return s;
 }
@@ -486,6 +488,49 @@ function buildFacts(a) {
 }
 
 let aiBusy = false;
+
+function cleanAiText(t) {
+    return String(t ?? '')
+        .replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, '')
+        .replace(/^[\s\S]*?<\/(think|thinking|reasoning)>/i, '')
+        .replace(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/i, '$1')
+        .trim();
+}
+
+// Tries a bare request first (no character card / preset), then SillyTavern's normal
+// "quiet" generation, which goes through your chat preset — some APIs, proxies and
+// models only answer properly that way.
+async function aiGenerate(prompt, responseLength) {
+    const c = ctx();
+    const problems = [];
+    if (typeof c.generateRaw === 'function') {
+        try {
+            const t = cleanAiText(await c.generateRaw({ prompt, systemPrompt: AI_SYSTEM_PROMPT, responseLength, trimNames: false }));
+            if (t) return t;
+            problems.push('direct request: empty reply');
+        } catch (err) {
+            console.warn('[Adventure Notebook] generateRaw failed, trying quiet generation', err);
+            problems.push(`direct request: ${err?.message || err}`);
+        }
+    }
+    if (typeof c.generateQuietPrompt === 'function') {
+        try {
+            const t = cleanAiText(await c.generateQuietPrompt({
+                quietPrompt: `[OOC: Pause the role-play. ${AI_SYSTEM_PROMPT}]\n\n${prompt}`,
+                responseLength, skipWIAN: true, removeReasoning: true,
+            }));
+            if (t) return t;
+            problems.push('through your chat preset: empty reply');
+        } catch (err) {
+            console.warn('[Adventure Notebook] generateQuietPrompt failed', err);
+            problems.push(`through your chat preset: ${err?.message || err}`);
+        }
+    }
+    if (!problems.length) throw new Error('This SillyTavern version has no generation API for extensions. Please update SillyTavern.');
+    const e = new Error(`Your AI sent back no text (${problems.join('; ')}). If you use a reasoning / thinking model, it may have used all ${responseLength} tokens thinking: raise “AI reply length” or lower the reasoning effort. Also check that a chat is open and the API is connected (a normal message works).`);
+    e.details = problems;
+    throw e;
+}
 async function updateNotebookWithAI() {
     const a = adventure();
     if (!a) { toastr.warning('No adventure yet — connect to the game first.', 'Adventure Notebook'); return; }
@@ -502,16 +547,8 @@ async function updateNotebookWithAI() {
     aiBusy = true;
     $('#pkmn_ai_update').addClass('disabled').find('span').text('Writing…');
     try {
-        let text = '';
-        if (typeof c.generateRaw === 'function') {
-            text = await c.generateRaw({ prompt, systemPrompt: AI_SYSTEM_PROMPT, responseLength: 600 });
-        } else if (typeof c.generateQuietPrompt === 'function') {
-            text = await c.generateQuietPrompt({ quietPrompt: `${AI_SYSTEM_PROMPT}\n\n${prompt}`, responseLength: 600 });
-        } else {
-            throw new Error('This SillyTavern version has no generation API for extensions.');
-        }
-        text = String(text || '').trim();
-        if (!text) throw new Error('The AI returned an empty answer.');
+        const text = await aiGenerate(prompt, Math.max(200, Number(s.aiResponseLength) || 2000));
+
         a.ai = { text, updated: Date.now() };
         s.mode = 'ai';
         save();
@@ -617,6 +654,10 @@ function panelHtml() {
           <label class="checkbox_label" title="A summary written by your connected AI; refresh it with the button"><input type="radio" name="pkmn_mode" value="ai"> AI-written</label>
           <span class="pkmn-grow"></span>
           <div id="pkmn_ai_update" class="menu_button menu_button_icon" title="Send the game facts to the AI you're connected to and let it rewrite the notebook"><i class="fa-solid fa-wand-magic-sparkles"></i> <span>Update notebook with AI</span></div>
+        </div>
+        <div class="pkmn-row pkmn-ai-opts">
+          <label title="Maximum tokens the AI may use for the notebook. Reasoning/thinking models need room to think first.">AI reply length <input id="pkmn_ai_len" class="text_pole" type="number" min="200" max="32000" step="100" style="width:7em"></label>
+          <label title="How many recent log events are sent to the AI">Events sent <input id="pkmn_ai_events" class="text_pole" type="number" min="10" max="500" step="10" style="width:6em"></label>
         </div>
         <div id="pkmn_ai_box">
           <small id="pkmn_ai_info" class="pkmn-muted"></small>
@@ -846,6 +887,8 @@ function renderNotebook() {
     $('#pkmn_partystyle').val(s.partyStyle);
     $('.pkmn_sec').each(function () { $(this).prop('checked', s.sections[$(this).data('sec')] !== false); });
     $(`input[name="pkmn_mode"][value="${s.mode}"]`).prop('checked', true);
+    $('#pkmn_ai_len').val(s.aiResponseLength);
+    $('#pkmn_ai_events').val(s.aiRecentEvents);
     const advAI = adventure()?.ai;
     $('#pkmn_ai_box').toggle(s.mode === 'ai');
     $('#pkmn_ai_text').val(advAI?.text || '');
@@ -1113,6 +1156,8 @@ function bind() {
     $p.on('change', '.pkmn_sec', function () { settings().sections[$(this).data('sec')] = this.checked; save(); renderPreview(); });
     $('input[name="pkmn_mode"]').on('change', function () { settings().mode = this.value; save(); renderNotebook(); });
     $('#pkmn_ai_update').on('click', updateNotebookWithAI);
+    $('#pkmn_ai_len').on('change', function () { settings().aiResponseLength = Math.max(200, Number(this.value) || 2000); save(); });
+    $('#pkmn_ai_events').on('change', function () { settings().aiRecentEvents = Math.max(10, Number(this.value) || 60); save(); });
     $('#pkmn_ai_text').on('input', function () {
         const a = adventure(); if (!a) return;
         a.ai = { ...(a.ai || {}), text: this.value, updated: a.ai?.updated || Date.now() }; save(); renderPreview();
