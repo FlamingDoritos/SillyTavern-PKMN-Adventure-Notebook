@@ -78,7 +78,7 @@ The extension connects to the game by itself and syncs every 5 seconds. The dot 
 | **Frequency** | Insert every N user messages (0 = off, 1 = always). Shows a countdown like Author's Note. |
 | **Include in World Info scanning** | Lets lorebook entries trigger on the notebook text. |
 | **Current party** | Your team at a glance: gender (♂ / ♀ / ∅), nature, HP, and a gold sparkle next to the level of shiny Pokémon. |
-| **What goes into the notebook** | How many recent events and milestones to include, the minimum importance, how detailed the party is, whether to include **gender** and **nature**, and which kinds of events to include. |
+| **What goes into the notebook** | How many recent events and milestones to include, the minimum importance, how detailed the party is, whether to include **gender** and **nature**, whether to show the **play time next to events** (also applies to what the AI gets), and which kinds of events to include. |
 | **Preview** | Exactly what will be sent, with a token count. |
 
 ### Log tab

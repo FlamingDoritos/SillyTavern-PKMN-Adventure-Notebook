@@ -6,7 +6,7 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.4.1';
+const VERSION = '1.4.2';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
@@ -94,6 +94,7 @@ const DEFAULT_SETTINGS = {
     partyStyle: 'detailed',
     includeGender: true,
     includeNature: true,
+    includeEventTimes: true,
     showWildNatures: true,
     sections: Object.fromEntries(Object.keys(SECTIONS).map(k => [k, true])),
     mode: 'live',
@@ -131,6 +132,7 @@ function settings() {
     for (const k of Object.keys(CATEGORIES)) if (s.categories[k] === undefined) s.categories[k] = k !== 'session';
     if (s.includeGender === undefined) s.includeGender = true;
     if (s.includeNature === undefined) s.includeNature = true;
+    if (s.includeEventTimes === undefined) s.includeEventTimes = true;
     if (s.showWildNatures === undefined) s.showWildNatures = true;
     if (!s.sections) s.sections = {};
     for (const k of Object.keys(SECTIONS)) if (s.sections[k] === undefined) s.sections[k] = true;
@@ -366,7 +368,7 @@ function eventIcon(e) {
 function eventLine(e) {
     const text = eventText(e);
     const where = e.loc && !/^Arrived|^Returned/.test(text) && !text.includes(e.loc) ? ` [${e.loc}]` : '';
-    const when = e.pt ? `(${e.pt}) ` : '';
+    const when = e.pt && settings().includeEventTimes !== false ? `(${e.pt}) ` : '';
     return `- ${when}${text}${where}`;
 }
 
@@ -702,6 +704,7 @@ function panelHtml() {
         <div class="pkmn-cats">
           <label class="checkbox_label"><input type="checkbox" id="pkmn_inc_gender"> Gender in party list</label>
           <label class="checkbox_label"><input type="checkbox" id="pkmn_inc_nature"> Nature in party list</label>
+          <label class="checkbox_label" title="The play time shown before each event, e.g. (12:34). Applies to the prompt, macros and what is sent to the AI."><input type="checkbox" id="pkmn_inc_times"> Play time next to events</label>
         </div>
         <div class="pkmn-cats">${catBoxes}</div>
       </details>
@@ -895,6 +898,7 @@ function renderNotebook() {
     $('#pkmn_ai_info').text(advAI?.updated ? `Last written by the AI: ${new Date(advAI.updated).toLocaleString()} — edit freely, it is used as-is.` : 'Not written yet.');
     $('#pkmn_inc_gender').prop('checked', !!s.includeGender);
     $('#pkmn_inc_nature').prop('checked', !!s.includeNature);
+    $('#pkmn_inc_times').prop('checked', s.includeEventTimes !== false);
     $('.pkmn_cat').each(function () { $(this).prop('checked', s.categories[$(this).data('cat')] !== false); });
     refreshAdventureSelect();
     renderPreview();
@@ -1164,6 +1168,7 @@ function bind() {
     });
     $('#pkmn_inc_gender').on('change', function () { settings().includeGender = this.checked; save(); renderPreview(); });
     $('#pkmn_inc_nature').on('change', function () { settings().includeNature = this.checked; save(); renderPreview(); });
+    $('#pkmn_inc_times').on('change', function () { settings().includeEventTimes = this.checked; save(); renderPreview(); });
     $p.on('change', '.pkmn_cat', function () { settings().categories[$(this).data('cat')] = this.checked; save(); renderPreview(); });
 
     // Log tab
