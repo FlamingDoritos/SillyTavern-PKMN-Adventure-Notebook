@@ -6,7 +6,7 @@
 
 const MODULE = 'pkmn_notebook';
 const PROMPT_KEY = 'PKMN_ADVENTURE_NOTEBOOK';
-const VERSION = '1.4.2';
+const VERSION = '1.4.3';
 
 // Same values as SillyTavern's extension_prompt_types / extension_prompt_roles
 const POS = { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
@@ -95,6 +95,7 @@ const DEFAULT_SETTINGS = {
     includeGender: true,
     includeNature: true,
     includeEventTimes: true,
+    partyEventNatures: true,
     showWildNatures: true,
     sections: Object.fromEntries(Object.keys(SECTIONS).map(k => [k, true])),
     mode: 'live',
@@ -133,6 +134,7 @@ function settings() {
     if (s.includeGender === undefined) s.includeGender = true;
     if (s.includeNature === undefined) s.includeNature = true;
     if (s.includeEventTimes === undefined) s.includeEventTimes = true;
+    if (s.partyEventNatures === undefined) s.partyEventNatures = true;
     if (s.showWildNatures === undefined) s.showWildNatures = true;
     if (!s.sections) s.sections = {};
     for (const k of Object.keys(SECTIONS)) if (s.sections[k] === undefined) s.sections[k] = true;
@@ -346,6 +348,9 @@ function visibleEvents(a) {
 
 // Text shown in the log and the prompt. Wild encounters are rebuilt from their data so the
 // "Wild natures" option can show or hide the nature (unless you edited the text yourself).
+// events where a Pokémon joins the team; their text carries its nature
+const NATURE_EVENTS = new Set(['catch', 'party_join', 'pc_withdraw', 'hatch']);
+
 function eventText(e) {
     const d = e.data;
     if (e.type === 'wild_encounter' && !e.edited && d && d.species) {
@@ -354,6 +359,9 @@ function eventText(e) {
         let t = `Encountered a wild ${d.shiny ? 'shiny ' : ''}${d.species} (${bits.join(', ')})`;
         if (d.result) t += ` — ${d.result}`;
         return t;
+    }
+    if (NATURE_EVENTS.has(e.type) && !e.edited && d?.nature && settings().partyEventNatures === false) {
+        return (e.text || '').replace(`, ${d.nature} nature`, '').replace(` (${d.nature} nature)`, '');
     }
     return e.text || '';
 }
@@ -722,6 +730,7 @@ function panelHtml() {
         <select id="pkmn_log_cat" class="text_pole" style="flex:0 0 auto;width:auto"><option value="all">All</option>${Object.entries(CATEGORIES).map(([k, d]) => `<option value="${k}">${d.label}</option>`).join('')}</select>
         <label class="checkbox_label" title="Show events you hid from the prompt"><input type="checkbox" id="pkmn_log_hidden"> hidden</label>
         <label class="checkbox_label" title="Show the nature of wild Pokémon you encounter (in the log and in the prompt)"><input type="checkbox" id="pkmn_wild_natures"> Wild natures</label>
+        <label class="checkbox_label" title="Show the nature of Pokémon that join your team (catches, gifts, hatched Eggs, PC withdrawals), in the log and in the prompt"><input type="checkbox" id="pkmn_party_natures"> New member natures</label>
       </div>
       <div class="pkmn-row">
         <input id="pkmn_manual_text" class="text_pole" placeholder="Add your own entry (story beat, decision, rule...)" style="flex:1">
@@ -1176,6 +1185,7 @@ function bind() {
     $('#pkmn_log_cat').on('change', function () { logFilter.category = this.value; renderLog(); });
     $('#pkmn_log_hidden').prop('checked', logFilter.showHidden).on('change', function () { logFilter.showHidden = this.checked; renderLog(); });
     $('#pkmn_wild_natures').prop('checked', settings().showWildNatures !== false).on('change', function () { settings().showWildNatures = this.checked; save(); renderLog(); renderPreview(); });
+    $('#pkmn_party_natures').prop('checked', settings().partyEventNatures !== false).on('change', function () { settings().partyEventNatures = this.checked; save(); renderLog(); renderPreview(); });
     const addManual = () => {
         const text = String($('#pkmn_manual_text').val() || '').trim();
         const a = adventure();

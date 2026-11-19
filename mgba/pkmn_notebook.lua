@@ -12,7 +12,7 @@
       SillyTavern "PKMN Adventure Notebook" extension.
 ]]
 
-local VERSION = "1.4.0"
+local VERSION = "1.4.3"
 
 ---------------------------------------------------------------------------------------------------
 -- Paths & config
@@ -1471,6 +1471,12 @@ local function partySummary(party)
   return table.concat(parts, ", ")
 end
 
+-- "Lv5" or "Lv5, Timid nature"
+local function lvNature(m)
+  local n = m and NATURES[m.nature]
+  return n and string.format("Lv%d, %s nature", m.level, n) or string.format("Lv%d", m.level)
+end
+
 local function resolveCatch(m, toPC)
   local pc = PENDING_CATCH
   PENDING_CATCH = nil
@@ -1478,13 +1484,14 @@ local function resolveCatch(m, toPC)
   local where = pc.loc and (" at " .. pc.loc) or ""
   local text
   if m then
-    text = string.format("Caught %s (Lv%d)%s", monDisplayName(m), m.level, where)
+    text = string.format("Caught %s (%s)%s", monDisplayName(m), lvNature(m), where)
   else
-    text = string.format("Caught a %s (Lv%d)%s and sent it to the PC", titleCase(lead.speciesName), lead.level, where)
+    text = string.format("Caught a %s (%s)%s and sent it to the PC", titleCase(lead.speciesName), lvNature(lead), where)
   end
   local data = pc.data or {}
   data.species = titleCase(lead.speciesName); data.level = lead.level; data.nickname = m and titleCase(m.nickname) or nil
   data.toPC = toPC or nil
+  data.nature = NATURES[(m or lead).nature]
   addEvent("catch", text, (lead.shiny and 3) or 2, data)
 end
 
@@ -1506,17 +1513,19 @@ local function diffParty(old, new)
       elseif m.isEgg then
         addEvent("party_join", "Received a Pokémon Egg", 2, { egg = true })
       elseif PCSET and PCSET[m.pid] then
-        addEvent("pc_withdraw", string.format("Withdrew %s (Lv%d) from the PC", monDisplayName(m), m.level), 1,
-          { species = titleCase(m.speciesName), level = m.level })
+        addEvent("pc_withdraw", string.format("Withdrew %s (%s) from the PC", monDisplayName(m), lvNature(m)), 1,
+          { species = titleCase(m.speciesName), level = m.level, nature = NATURES[m.nature] })
       else
-        addEvent("party_join", string.format("%s (Lv%d) joined the party", monDisplayName(m), m.level), 2,
-          { species = titleCase(m.speciesName), level = m.level })
+        addEvent("party_join", string.format("%s (%s) joined the party", monDisplayName(m), lvNature(m)), 2,
+          { species = titleCase(m.speciesName), level = m.level, nature = NATURES[m.nature] })
       end
     else
       -- same Pokémon, look for changes
       local name = monShort(m)
       if o.isEgg and not m.isEgg then
-        addEvent("hatch", string.format("An Egg hatched into %s!", titleCase(m.speciesName)), 2, { species = titleCase(m.speciesName) })
+        local hn = NATURES[m.nature]
+        addEvent("hatch", string.format("An Egg hatched into %s%s!", titleCase(m.speciesName), hn and (" (" .. hn .. " nature)") or ""), 2,
+          { species = titleCase(m.speciesName), nature = hn })
       elseif o.species ~= m.species and not m.isEgg then
         addEvent("evolution", string.format("%s evolved into %s!", monShort(o), titleCase(m.speciesName)), 2,
           { from = titleCase(o.speciesName), to = titleCase(m.speciesName) })

@@ -87,6 +87,7 @@ The extension connects to the game by itself and syncs every 5 seconds. The dot 
 * 📌 pins an event to the milestones. 👁 hides it from the prompt. 🗑 deletes it.
 * **Add** writes your own entries into the story log.
 * **Wild natures** shows or hides wild Pokémon's natures, in the log and in the prompt.
+* **New member natures** does the same for Pokémon joining your team: catches, gifts, hatched Eggs and PC withdrawals.
 
 ### Game tab
 * Bridge address. Change it if you set another port in `notebook_config.lua`, or run SillyTavern on another device. In that case, use the PC's LAN IP, e.g. `http://192.168.1.20:8888`.
@@ -107,8 +108,8 @@ Browse what the script read out of the ROM: Pokémon, moves, abilities, items, t
 | New area | *Arrived at Route 104 for the first time* |
 | Trainer battles | *Defeated Leader Roxanne (Geodude Lv12, Nosepass Lv15)* · *Lost to Rival May (…) and blacked out* |
 | Wild encounters | *Encountered a wild Zigzagoon (Lv3, Timid nature) — ran away*. Logged when the battle starts, then updated with the result: defeated it / ran away / it fled / caught it! / blacked out. The **Wild natures** checkbox in the Log tab shows or hides the nature. |
-| Catches | *Caught Ziggy the Zigzagoon (Lv3) at Route 101*, also when sent to the PC |
-| Party | joined / left the party, received an Egg, Egg hatched, nicknames |
+| Catches | *Caught Ziggy the Zigzagoon (Lv3, Timid nature) at Route 101*, also when sent to the PC |
+| Party | *Ziggy (Lv5, Jolly nature) joined the party*, left the party, received an Egg, Egg hatched, nicknames |
 | Growth | level-ups, evolutions, moves learned (and forgotten) |
 | Faints | *Ziggy fainted against Leader Roxanne* (useful for Nuzlockes) |
 | Milestones | badges (with their names), becoming Champion |
